@@ -43,7 +43,7 @@ import pandas as pd
 import requests
 from dotenv import load_dotenv
 
-ML (tiny NN). Torch is optional on cloud; we fall back to sigmoid if missing.
+# ML (tiny NN). Torch is optional on cloud; we fall back to sigmoid if missing.
 
 try: import torch import torch.nn as nn import torch.optim as optim TORCH_OK = True except Exception: TORCH_OK = False
 
