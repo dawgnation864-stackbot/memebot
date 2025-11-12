@@ -25,8 +25,7 @@ Features:
 Educational example. Not financial advice. Use at your own risk.
 """
 
-Live trading needs valid WALLET_PRIVATE_KEY (base58) and WITHDRAWAL_ADDRESS. """
-
+# Live trading needs valid WALLET_PRIVATE_KEY (base58) and WITHDRAWAL_ADDRESS.
 
 ===== Standard library =====
 
