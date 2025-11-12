@@ -1,4 +1,4 @@
-I'm#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 Memebot - Solana memecoin bot (cloud ready)
 Features:
