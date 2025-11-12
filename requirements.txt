@@ -1,0 +1,14 @@
+requests
+schedule
+numpy
+pandas
+python-dotenv
+# data helpers
+duckduckgo-search
+tweepy
+# live trading stack
+base58
+solana
+solders
+# ML (optional but recommended)
+torch
