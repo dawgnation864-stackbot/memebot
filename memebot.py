@@ -11,7 +11,19 @@ Features:
 """
 IMPORTANT
 
-Educational example. Not financial advice. Use a fresh wallet and small funds.
+"""
+Memebot - Solana memecoin bot (cloud ready)
+
+Features:
+- GMGN / PumpFun / KOL scanners (best effort)
+- Dexscreener lookups
+- Daily learning + daily summary
+- Tuned trade threshold
+- Daily loss limit ($25 default)
+- Sell-then-withdraw
+
+Educational example. Not financial advice. Use at your own risk.
+"""
 
 Live trading needs valid WALLET_PRIVATE_KEY (base58) and WITHDRAWAL_ADDRESS. """
 
