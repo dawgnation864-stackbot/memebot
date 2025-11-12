@@ -1,10 +1,15 @@
-#!/usr/bin/env python3 """ Memebot — simple Solana memecoin bot (cloud‑ready)
+#!/usr/bin/env python3
+"""
+Memebot - Solana memecoin bot (cloud ready)
 
-Runs hourly, learns daily, and can trade live when SIMULATION_MODE=False
-
-Includes: GMGN/PumpFun/KOL scanners (best‑effort), Dexscreener info, learning, daily summary, tuned trade threshold, daily loss limit, and sell‑then‑withdraw
-
-
+Features:
+- GMGN / PumpFun / KOL scanners (best effort)
+- Dexscreener lookups
+- Daily learning + daily summary
+- Tuned trade threshold
+- Daily loss limit ($25 default)
+- Sell-then-withdraw
+"""
 IMPORTANT
 
 Educational example. Not financial advice. Use a fresh wallet and small funds.
