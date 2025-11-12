@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+I'm#!/usr/bin/env python3
 """
 Memebot - Solana memecoin bot (cloud ready)
 Features:
@@ -45,7 +45,14 @@ from dotenv import load_dotenv
 
 # ML (tiny NN). Torch is optional on cloud; we fall back to sigmoid if missing.
 
-try: import torch import torch.nn as nn import torch.optim as optim TORCH_OK = True except Exception: TORCH_OK = False
+# Optional: try to load PyTorch
+try:
+    import torch
+    import torch.nn as nn
+    import torch.optim as optim
+    TORCH_OK = True
+except Exception:
+    TORCH_OK = False
 
 Optional libs (only used if SIMULATION_MODE=False for live swaps)
 
