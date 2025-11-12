@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
 Memebot - Solana memecoin bot (cloud ready)
-
 Features:
 - GMGN / PumpFun / KOL scanners (best effort)
 - Dexscreener lookups
