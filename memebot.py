@@ -31,7 +31,7 @@ Educational example. Not financial advice. Use at your own risk.
 
 import asyncio import base64 import base58 import os import re import sqlite3 import time from datetime import datetime
 
-===== Third‑party =====
+# ---------- Third-party ----------
 
 import numpy as np import pandas as pd import requests import schedule from dotenv import load_dotenv
 
