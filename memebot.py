@@ -121,7 +121,9 @@ def log_trade(symbol, ca, action, amount_lamports, token_amount=0, pnl=0, outcom
 
 def _close_open_trade(contract_address: str): conn = sqlite3.connect(DB_FILE) c = conn.cursor() c.execute("UPDATE trades SET outcome='CLOSED' WHERE contract_address=? AND outcome='OPEN'", (contract_address,)) conn.commit() conn.close()
 
-def log_portfolio(capital_sol, daily_pnl_sol, trades_today): conn = sqlite3.connect(DB_FILE) c = conn.cursor() c.execute( """ INSERT INTO portfolio (date, capital_sol, daily_pnl_sol, trades_today) VALUES (?, ?, ?, ?) """, (datetime.now().date(), capital_sol, daily_pnl_sol, trades_today), ) conn.commit() conn.close()
+def log_portfolio(capital_sol, daily_pnl_sol, trades_today): conn = sqlite3.connect(DB_FILE) c = conn.cursor() conn.commit() conn.close()c.execute("""INSERT INTO learn_events (timestamp, symbol, contract_address, prob, risk_ratio, trade_size_sol, pnl_sol, label)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+          (ts, symbol, ca, float(prob), float(risk_ratio), float(trade_size_sol), float(pnl_sol), int(label)))
 
 def _insert_learn_event(ts, symbol, ca, prob, risk_ratio, trade_size_sol, pnl_sol): conn = sqlite3.connect(DB_FILE) c = conn.cursor() label = 1 if pnl_sol > 0 else 0 c.execute( """ INSERT INTO learn_events (timestamp, symbol, contract_address, prob, risk_ratio, trade_size_sol, pnl_sol, label) VALUES (?, ?, ?, ?, ?, ?, ?, ?) """, (ts, symbol, ca, float(prob), float(risk_ratio), float(trade_size_sol), float(pnl_sol), int(label)), ) conn.commit() conn.close()
 
