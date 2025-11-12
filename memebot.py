@@ -125,8 +125,21 @@ def log_portfolio(capital_sol, daily_pnl_sol, trades_today): conn = sqlite3.conn
              VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
           (ts, symbol, ca, float(prob), float(risk_ratio), float(trade_size_sol), float(pnl_sol), int(label)))
 
-def _insert_learn_event(ts, symbol, ca, prob, risk_ratio, trade_size_sol, pnl_sol): conn = sqlite3.connect(DB_FILE) c = conn.cursor() label = 1 if pnl_sol > 0 else 0 c.execute( """ INSERT INTO learn_events (timestamp, symbol, contract_address, prob, risk_ratio, trade_size_sol, pnl_sol, label) VALUES (?, ?, ?, ?, ?, ?, ?, ?) """, (ts, symbol, ca, float(prob), float(risk_ratio), float(trade_size_sol), float(pnl_sol), int(label)), ) conn.commit() conn.close()
-
+def _insert_learn_event(ts, symbol, ca, prob, risk_ratio, trade_size_sol, pnl_sol):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    label = 1 if pnl_sol > 0 else 0
+    query = """
+    INSERT INTO learn_events (
+        timestamp, symbol, contract_address, prob, risk_ratio,
+        trade_size_sol, pnl_sol, label
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    """
+    c.execute(query, (ts, symbol, ca, float(prob), float(risk_ratio),
+                      float(trade_size_sol), float(pnl_sol), int(label)))
+    conn.commit()
+    conn.close()
 def get_today_pnl_sol() -> float: conn = sqlite3.connect(DB_FILE) df = pd.read_sql_query( "SELECT pnl_sol, timestamp FROM learn_events WHERE DATE(timestamp)=DATE('now', 'localtime')", conn, parse_dates=["timestamp"], ) conn.close() return float(df["pnl_sol"].sum()) if not df.empty else 0.0
 
 ===== Data sources =====
