@@ -38,7 +38,10 @@ from datetime import datetime
 
 # ---------- Third-party ----------
 
-import numpy as np import pandas as pd import requests import schedule from dotenv import load_dotenv
+import numpy as np
+import pandas as pd
+import requests
+from dotenv import load_dotenv
 
 ML (tiny NN). Torch is optional on cloud; we fall back to sigmoid if missing.
 
