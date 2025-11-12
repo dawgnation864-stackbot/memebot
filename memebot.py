@@ -27,7 +27,7 @@ Educational example. Not financial advice. Use at your own risk.
 
 # Live trading needs valid WALLET_PRIVATE_KEY (base58) and WITHDRAWAL_ADDRESS.
 
-===== Standard library =====
+# ---------- Standard library --------
 
 import asyncio import base64 import base58 import os import re import sqlite3 import time from datetime import datetime
 
