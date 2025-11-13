@@ -21,8 +21,9 @@ RUN python -m pip install --upgrade pip \
 
 COPY memebot.py /app/
 
-# Default settings (you can change in Railway)
-ENV SIMULATION_MODE=True
+# REMOVE simulation default so Railway can control it
+# ENV SIMULATION_MODE=True   <-- delete this line completely
+
 ENV START_MODE=start
 
 CMD ["python", "memebot.py"]
