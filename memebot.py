@@ -1,157 +1,162 @@
 #!/usr/bin/env python3
 """
-Memebot - Solana memecoin bot (cloud ready)
-Features:
-- GMGN / PumpFun / KOL scanners (best effort)
-- Dexscreener lookups
-- Daily learning + daily summary
-- Tuned trade threshold
-- Daily loss limit ($25 default)
-- Sell-then-withdraw
-"""
-IMPORTANT
+Memebot - Solana memecoin bot (cloud ready).
 
-"""
-Memebot - Solana memecoin bot (cloud ready)
-
-Features:
-- GMGN / PumpFun / KOL scanners (best effort)
-- Dexscreener lookups
-- Daily learning + daily summary
-- Tuned trade threshold
-- Daily loss limit ($25 default)
-- Sell-then-withdraw
-
-Educational example. Not financial advice. Use at your own risk.
+Educational example ONLY. Not financial advice. Use at your own risk.
+Live trading requires WALLET_PRIVATE_KEY (base58) and WITHDRAWAL_ADDRESS.
 """
 
-# Live trading needs valid WALLET_PRIVATE_KEY (base58) and WITHDRAWAL_ADDRESS.
-
-# ---------- Standard library --------
-
+# ---------- standard library imports ----------
+import os
+import sqlite3
 import asyncio
 import base64
-import base58
-import sqlite3
 import time
-from datetime import datetime
+from datetime import datetime, date
 
-# ---------- Third-party ----------
-
+# ---------- third-party imports ----------
+import requests
 import numpy as np
 import pandas as pd
-import requests
+import schedule
 from dotenv import load_dotenv
+from duckduckgo_search import DDGS
 
-# ML (tiny NN). Torch is optional on cloud; we fall back to sigmoid if missing.
-
-# Optional: try to load PyTorch
+# ---------- optional Solana / Jupiter stack ----------
 try:
-    import torch
-    import torch.nn as nn
-    import torch.optim as optim
-    TORCH_OK = True
+    from solana.keypair import Keypair
+    from solana.rpc.api import Client
+    from solana.publickey import PublicKey
+    from solana.system_program import TransferParams, transfer
+    from solders.transaction import VersionedTransaction
+    from solders.message import MessageV0
+    from solders.instruction import Instruction, AccountMeta
+    from solders.pubkey import Pubkey
+
+    SOLANA_OK = True
 except Exception:
-    TORCH_OK = False
+    SOLANA_OK = False
 
-Optional libs (only used if SIMULATION_MODE=False for live swaps)
-
-try: from solana.keypair import Keypair from solana.publickey import PublicKey from solana.rpc.api import Client from solana.system_program import TransferParams, transfer from solders.transaction import VersionedTransaction from solders.message import MessageV0 from solders.instruction import Instruction, AccountMeta from solders.pubkey import Pubkey SOLANA_OK = True except Exception: SOLANA_OK = False Keypair = None  # type: ignore
-
-===== Config =====
-
+# ---------- load .env ----------
 load_dotenv()
 
-TWITTER_BEARER_TOKEN = os.getenv("TWITTER_BEARER_TOKEN") GMGN_API_KEY = os.getenv("GMGN_API_KEY")
+# ---------- configuration from env ----------
+SIMULATION_MODE = os.getenv("SIMULATION_MODE", "True").lower() == "true"
+START_MODE = os.getenv("START_MODE", "start").lower()  # 'start' or 'withdraw'
 
-WALLET_PRIVATE_KEY = os.getenv("WALLET_PRIVATE_KEY")  # base58 WITHDRAWAL_ADDRESS = os.getenv("WITHDRAWAL_ADDRESS")  # string address PIN = os.getenv("PIN", "1234")
+STARTING_USD = float(os.getenv("STARTING_USD", "100"))          # challenge: start with $100
+SOL_PRICE_USD = float(os.getenv("SOL_PRICE_USD", "250"))        # rough price
+DAILY_LOSS_LIMIT_USD = float(os.getenv("DAILY_LOSS_LIMIT_USD", "25"))
 
-SIMULATION_MODE = os.getenv("SIMULATION_MODE", "True").lower() == "true" JUPITER_ENDPOINT = "https://quote-api.jup.ag/v6" SOLANA_RPC = os.getenv("SOLANA_RPC", "https://api.mainnet-beta.solana.com")
+TRADE_THRESHOLD = float(os.getenv("TRADE_THRESHOLD", "0.72"))   # min probability to trade
 
-Challenge settings (USD based)
+DB_FILE = os.getenv("DB_FILE", "memebot.db")
 
-STARTING_USD = float(os.getenv("STARTING_USD", "100")) SOL_PRICE_USD = float(os.getenv("SOL_PRICE_USD", "250")) DAILY_LOSS_LIMIT_USD = float(os.getenv("DAILY_LOSS_LIMIT_USD", "25")) STARTING_CAPITAL_SOL = STARTING_USD / max(SOL_PRICE_USD, 1e-6) DAILY_LOSS_LIMIT_SOL = DAILY_LOSS_LIMIT_USD / max(SOL_PRICE_USD, 1e-6)
+JUPITER_ENDPOINT = os.getenv("JUPITER_ENDPOINT", "https://quote-api.jup.ag/v6")
+SOLANA_RPC = os.getenv("SOLANA_RPC", "https://api.mainnet-beta.solana.com")
+WALLET_PRIVATE_KEY = os.getenv("WALLET_PRIVATE_KEY", "")
+WITHDRAWAL_ADDRESS = os.getenv("WITHDRAWAL_ADDRESS", "")
+PIN = os.getenv("PIN", "1234")
 
-Trading threshold (be picky)
+# ---------- simple state in memory ----------
+# we treat this as "current capital" for the challenge
+STARTING_SOL = STARTING_USD / SOL_PRICE_USD
+current_capital_sol = STARTING_SOL
+today_pnl_sol = 0.0
+today_trade_count = 0
+today_date = date.today()
 
-TRADE_THRESHOLD = float(os.getenv("TRADE_THRESHOLD", "0.72"))
+# ---------- database helpers ----------
 
-TRADE_AMOUNT_LAMPORTS = int(os.getenv("TRADE_AMOUNT_LAMPORTS", "100000000"))  # 0.1 SOL MODEL_PATH = "memecoin_model.pth" DB_FILE = os.getenv("DB_FILE", "memecoins.db")
+def init_db() -> None:
+    """Create tables if they don't exist."""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
 
-NEGATIVE_KEYWORDS = ( "scam OR rug OR honeypot OR dump OR fake OR phishing OR rugpull" ) KOL_HANDLES = [ "A1lon9", "aeyakovenko", "Blknoiz06", "DegenerateNews", "Theunipcs", "Kmoney_69", "CryptoWendyO", "lmrankhan", "TheCryptoLark", "MattWallace888", ]
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TIMESTAMP,
+            symbol TEXT,
+            contract_address TEXT,
+            action TEXT,
+            size_sol REAL,
+            prob REAL,
+            risk_ratio REAL,
+            pnl_sol REAL,
+            mode TEXT
+        )
+        """
+    )
 
-===== Database =====
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS portfolio (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TEXT,
+            capital_sol REAL,
+            daily_pnl_sol REAL,
+            trades_today INTEGER
+        )
+        """
+    )
 
-def init_db(): conn = sqlite3.connect(DB_FILE) c = conn.cursor() c.execute( """ CREATE TABLE IF NOT EXISTS memecoins ( symbol TEXT, name TEXT, contract_address TEXT PRIMARY KEY, market_cap REAL DEFAULT 0, volume_1h REAL DEFAULT 0, holders INTEGER DEFAULT 0, liquidity REAL DEFAULT 0, mentions_x INTEGER DEFAULT 0, negative_mentions INTEGER DEFAULT 0, risk_ratio REAL DEFAULT 0.0, source TEXT DEFAULT 'unknown', last_updated TIMESTAMP ) """ ) c.execute( """ CREATE TABLE IF NOT EXISTS history ( id INTEGER PRIMARY KEY AUTOINCREMENT, contract_address TEXT, timestamp TIMESTAMP, market_cap REAL, volume_1h REAL, holders INTEGER, liquidity REAL, mentions_x INTEGER, negative_mentions INTEGER, risk_ratio REAL, holder_growth REAL DEFAULT 0, volume_growth REAL DEFAULT 0, mention_velocity REAL DEFAULT 0, liq_ratio REAL DEFAULT 0, success_label INTEGER DEFAULT 0, FOREIGN KEY (contract_address) REFERENCES memecoins (contract_address) ) """ ) c.execute( """ CREATE TABLE IF NOT EXISTS trades ( id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT, contract_address TEXT, trade_time TIMESTAMP, action TEXT, amount_lamports REAL, token_amount REAL, pnl_sol REAL DEFAULT 0, outcome TEXT ) """ ) c.execute( """ CREATE TABLE IF NOT EXISTS portfolio ( id INTEGER PRIMARY KEY AUTOINCREMENT, date TIMESTAMP, capital_sol REAL, daily_pnl_sol REAL, trades_today INTEGER ) """ ) c.execute( """ CREATE TABLE IF NOT EXISTS learn_events ( id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TIMESTAMP, symbol TEXT, contract_address TEXT, prob REAL, risk_ratio REAL, trade_size_sol REAL, pnl_sol REAL, label INTEGER ) """ ) conn.commit() conn.close()
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS learn_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TIMESTAMP,
+            symbol TEXT,
+            contract_address TEXT,
+            prob REAL,
+            risk_ratio REAL,
+            trade_size_sol REAL,
+            pnl_sol REAL,
+            label INTEGER
+        )
+        """
+    )
 
-===== ML =====
+    conn.commit()
+    conn.close()
 
-class MemecoinPredictor: """Tiny wrapper: uses torch if available, else a simple logistic model. Input features: [prob, risk, hour_sin, hour_cos, size_norm, pnl_roll] """ def init(self, input_size=6): self.use_torch = TORCH_OK if TORCH_OK: self.model = nn.Sequential( nn.Linear(input_size, 32), nn.ReLU(), nn.Linear(32, 16), nn.ReLU(), nn.Linear(16, 1), nn.Sigmoid(), ) if os.path.exists(MODEL_PATH): try: self.model.load_state_dict(torch.load(MODEL_PATH, map_location="cpu")) self.model.eval() print("Loaded existing model.") except Exception: print("Model load failed; starting fresh.") else: # simple weights for logistic fallback self.w = np.zeros((input_size,)) self.b = 0.0
 
-def predict(self, x: np.ndarray) -> float:
-    x = x.astype(np.float32)
-    if self.use_torch:
-        with torch.no_grad():
-            t = torch.tensor(x).unsqueeze(0)
-            p = self.model(t).item()
-        return float(p)
-    # logistic fallback
-    z = float(np.dot(self.w, x) + self.b)
-    return 1.0 / (1.0 + np.exp(-z))
+def log_trade(ts: datetime, symbol: str, ca: str, action: str, size_sol: float,
+              prob: float, risk_ratio: float, pnl_sol: float, mode: str) -> None:
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute(
+        """
+        INSERT INTO trades (ts, symbol, contract_address, action, size_sol, prob,
+                            risk_ratio, pnl_sol, mode)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (ts, symbol, ca, action, size_sol, prob, risk_ratio, pnl_sol, mode),
+    )
+    conn.commit()
+    conn.close()
 
-def train(self, X: np.ndarray, y: np.ndarray, epochs: int = 200, lr: float = 1e-3):
-    if X.size == 0:
-        return
-    if self.use_torch:
-        m = self.model
-        opt = optim.Adam(m.parameters(), lr=lr)
-        loss_fn = nn.BCELoss()
-        m.train()
-        Xt = torch.tensor(X, dtype=torch.float32)
-        yt = torch.tensor(y.reshape(-1, 1), dtype=torch.float32)
-        for _ in range(epochs):
-            opt.zero_grad()
-            out = m(Xt)
-            loss = loss_fn(out, yt)
-            loss.backward()
-            opt.step()
-        torch.save(m.state_dict(), MODEL_PATH)
-        print(f"[learn] Trained on {len(X)} events.")
-    else:
-        # simple gradient step for fallback (not great, but keeps example working)
-        for _ in range(epochs):
-            z = X @ self.w + self.b
-            p = 1.0 / (1.0 + np.exp(-z))
-            grad_w = ((p - y)[:, None] * X).mean(axis=0)
-            grad_b = (p - y).mean()
-            self.w -= lr * grad_w
-            self.b -= lr * grad_b
 
-def load_or_create_model() -> MemecoinPredictor: return MemecoinPredictor()
+def log_portfolio_for_day(day: date, capital_sol: float,
+                          daily_pnl_sol: float, trades_today: int) -> None:
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute(
+        """
+        INSERT INTO portfolio (date, capital_sol, daily_pnl_sol, trades_today)
+        VALUES (?, ?, ?, ?)
+        """,
+        (day.isoformat(), capital_sol, daily_pnl_sol, trades_today),
+    )
+    conn.commit()
+    conn.close()
 
-===== Wallet / Jupiter (live mode) =====
 
-def init_solana_wallet(): if SIMULATION_MODE: print("SIMULATION_MODE=True — no wallet init.") return None if not SOLANA_OK: print("Solana libs not available. Cannot trade live.") return None if not WALLET_PRIVATE_KEY: print("WALLET_PRIVATE_KEY not set.") return None try: secret_key_bytes = base58.b58decode(WALLET_PRIVATE_KEY) wallet = Keypair.from_secret_key(secret_key_bytes) connection = Client(SOLANA_RPC) print(f"Live wallet: {wallet.public_key}") return wallet, connection except Exception as e: print(f"Wallet init error: {e}") return None
-
-def get_quote(input_mint: str, output_mint: str, amount: int) -> dict: url = f"{JUPITER_ENDPOINT}/quote" resp = requests.get(url, params={"inputMint": input_mint, "outputMint": output_mint, "amount": amount}, timeout=20) if resp.status_code == 200: return resp.json() raise RuntimeError(f"Quote error: {resp.text}")
-
-def instruction_to_solana_ix(jup_ix: dict): program_id = Pubkey.from_string(jup_ix["programId"])  # type: ignore keys = [ AccountMeta(pubkey=Pubkey.from_string(acc["pubkey"]), is_signer=acc["isSigner"], is_writable=acc["isWritable"])  # type: ignore for acc in jup_ix["accounts"] ] data = base64.b64decode(jup_ix["data"]) return Instruction(program_id, keys, data)
-
-async def execute_swap(quote: dict, wallet, connection, token_mint: str, amount_lamports: int, is_buy: bool = True): swap_url = f"{JUPITER_ENDPOINT}/swap" req = {"quoteResponse": quote, "userPublicKey": str(wallet.public_key), "wrapAndUnwrapSol": True, "prioritizationFeeLamports": "auto"} r = requests.post(swap_url, json=req, timeout=30) if r.status_code != 200: raise RuntimeError(f"Swap error: {r.text}") swap_tx_buf = base64.b64decode(r.json()["swapTransaction"])  # type: ignore swap_tx = VersionedTransaction.from_bytes(swap_tx_buf) swap_tx.sign([wallet]) txid = connection.send_raw_transaction(bytes(swap_tx), opts={"skip_preflight": True, "max_retries": 2}) print(f"Swap TX: {txid.value}") conf = connection.confirm_transaction(txid.value, commitment="confirmed") if getattr(conf.value, "err", None): raise RuntimeError(f"Swap failed: {conf.value.err}") print(f"Swap confirmed! {'Bought' if is_buy else 'Sold'} {amount_lamports/1e9:.4f} SOL of {token_mint}") return txid.value
-
-def place_live_swap(wallet, connection, token_mint: str, amount_lamports: int, symbol: str, ca: str, is_buy: bool = True): sol_mint = "So11111111111111111111111111111111111111112" inp = sol_mint if is_buy else token_mint outp = token_mint if is_buy else sol_mint try: quote = get_quote(inp, outp, amount_lamports) txid = asyncio.run(execute_swap(quote, wallet, connection, token_mint, amount_lamports, is_buy)) log_trade(symbol, ca, "BUY" if is_buy else "SELL", amount_lamports, 0, 0) return txid except Exception as e: print(f"Live swap error: {e}") return None
-
-===== Trade log, portfolio, learn rows =====
-
-def log_trade(symbol, ca, action, amount_lamports, token_amount=0, pnl=0, outcome="OPEN"): conn = sqlite3.connect(DB_FILE) c = conn.cursor() c.execute( """ INSERT INTO trades (symbol, contract_address, trade_time, action, amount_lamports, token_amount, pnl_sol, outcome) VALUES (?, ?, ?, ?, ?, ?, ?, ?) """, (symbol, ca, datetime.now(), action, amount_lamports, token_amount, pnl, outcome), ) conn.commit() conn.close()
-
-def _close_open_trade(contract_address: str): conn = sqlite3.connect(DB_FILE) c = conn.cursor() c.execute("UPDATE trades SET outcome='CLOSED' WHERE contract_address=? AND outcome='OPEN'", (contract_address,)) conn.commit() conn.close()
-
-def log_portfolio(capital_sol, daily_pnl_sol, trades_today): conn = sqlite3.connect(DB_FILE) c = conn.cursor() conn.commit() conn.close()c.execute("""INSERT INTO learn_events (timestamp, symbol, contract_address, prob, risk_ratio, trade_size_sol, pnl_sol, label)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-          (ts, symbol, ca, float(prob), float(risk_ratio), float(trade_size_sol), float(pnl_sol), int(label)))
-
-def _insert_learn_event(ts, symbol, ca, prob, risk_ratio, trade_size_sol, pnl_sol):
+def insert_learn_event(ts: datetime, symbol: str, ca: str,
+                       prob: float, risk_ratio: float,
+                       trade_size_sol: float, pnl_sol: float) -> None:
+    """Store result of a trade for simple 'learning'."""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     label = 1 if pnl_sol > 0 else 0
@@ -162,193 +167,367 @@ def _insert_learn_event(ts, symbol, ca, prob, risk_ratio, trade_size_sol, pnl_so
     )
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     """
-    c.execute(query, (ts, symbol, ca, float(prob), float(risk_ratio),
-                      float(trade_size_sol), float(pnl_sol), int(label)))
+    c.execute(
+        query,
+        (
+            ts,
+            symbol,
+            ca,
+            float(prob),
+            float(risk_ratio),
+            float(trade_size_sol),
+            float(pnl_sol),
+            int(label),
+        ),
+    )
     conn.commit()
     conn.close()
-def get_today_pnl_sol() -> float: conn = sqlite3.connect(DB_FILE) df = pd.read_sql_query( "SELECT pnl_sol, timestamp FROM learn_events WHERE DATE(timestamp)=DATE('now', 'localtime')", conn, parse_dates=["timestamp"], ) conn.close() return float(df["pnl_sol"].sum()) if not df.empty else 0.0
 
-===== Data sources =====
+# ---------- very simple 'learning' ----------
+# Instead of a big ML model, we compute rolling win rate for high-prob trades.
 
-_SOLANA_MINT_RE = re.compile(r"[1-9A-HJ-NP-Za-km-z]{32,44}")
 
-def _get_json(url, params=None, headers=None, timeout=20): try: r = requests.get(url, params=params or {}, headers=headers or {}, timeout=timeout) if r.status_code == 200: return r.json() print(f"[data] {url} -> {r.status_code}") except Exception as e: print(f"[data] GET error {url}: {e}") return None
-
-def fetch_top_memecoins_from_gmgn(limit: int = 10): url = "https://gmgn.ai/api/v1/token/sol/trending" headers = {"Authorization": f"Bearer {GMGN_API_KEY}"} if GMGN_API_KEY else {} data = _get_json(url, headers=headers) out = [] if isinstance(data, dict) and "data" in data: for row in data.get("data", [])[:limit]: symbol = row.get("symbol") or row.get("name") or "GMGN" mint = row.get("address") or row.get("mint") if mint: out.append((symbol, mint)) return out
-
-def fetch_trending_from_pumpfun(limit: int = 10): url = "https://pump.fun/api/trending" data = _get_json(url) out = [] if isinstance(data, list): for row in data[:limit]: symbol = row.get("symbol") or row.get("name") or "PUMP" mint = row.get("mint") or row.get("address") if mint: out.append((symbol, mint)) return out
-
-def scan_kol_tweets(max_per_user: int = 20): if not TWITTER_BEARER_TOKEN: return [] out = [] try: import tweepy client = tweepy.Client(bearer_token=TWITTER_BEARER_TOKEN, wait_on_rate_limit=True) for handle in KOL_HANDLES: try: user = client.get_user(username=handle).data if not user: continue tweets = client.get_users_tweets(user.id, max_results=min(20, max_per_user), tweet_fields=["text"]).data or [] for t in tweets: for m in _SOLANA_MINT_RE.findall(t.text or ""): out.append(("KOL", m)) except Exception as e: print(f"[kol] {handle}: {e}") except Exception as e: print(f"[kol] init: {e}") return out
-
-def get_token_info_from_dexscreener(mint: str): url = f"https://api.dexscreener.com/latest/dex/tokens/{mint}" data = _get_json(url) if not data or not isinstance(data, dict): return {} pairs = data.get("pairs") or [] if not pairs: return {} p = pairs[0] return { "symbol": p.get("baseToken", {}).get("symbol"), "fdv": p.get("fdv"), "liquidity": (p.get("liquidity", {}) or {}).get("usd"), "volume24h": p.get("volume", {}).get("h24"), "priceUsd": p.get("priceUsd"), }
-
-===== Strategy pieces =====
-
-def simulate_trade(capital_sol, signal_strength, risk_ratio): # Simple asymmetric returns, capped loss if risk_ratio > 0.3: loss = 0.1 return capital_sol - loss, -loss ret = 0.862 if signal_strength > 0.5 else -0.2 gain = capital_sol * ret if gain < -0.1: gain = -0.1 return capital_sol + gain, gain
-
-def _predict_success(model: MemecoinPredictor, features: np.ndarray) -> float: return model.predict(features)
-
-def analyze_token_success(wallet_info, model, current_capital_sol: float = STARTING_CAPITAL_SOL): print("Analyzing token success… (learn-enabled, tuned threshold)")
-
-# 1) candidates
-cands = []
-try:
-    cands += [(s or "GMGN", m, "gmgn") for s, m in fetch_top_memecoins_from_gmgn(limit=8)]
-except Exception as e:
-    print(f"[gmgn] {e}")
-try:
-    cands += [(s or "PUMP", m, "pump") for s, m in fetch_trending_from_pumpfun(limit=8)]
-except Exception as e:
-    print(f"[pumpfun] {e}")
-try:
-    cands += [(s or "KOL", m, "kol") for s, m in scan_kol_tweets(max_per_user=10)]
-except Exception as e:
-    print(f"[kol] {e}")
-
-# dedupe by mint
-seen, uniq = set(), []
-for sym, m, src in cands:
-    if not m or m in seen:
-        continue
-    seen.add(m)
-    uniq.append((sym, m, src))
-if not uniq:
-    uniq = [("DUMMY", "So11111111111111111111111111111111111111112", "fallback")]
-
-trades_today = 0
-daily_pnl_sol = 0.0
-
-now = datetime.now()
-hour_sin = np.sin(2 * np.pi * now.hour / 24.0)
-hour_cos = np.cos(2 * np.pi * now.hour / 24.0)
-
-for symbol, ca, src in uniq[:3]:
-    info = get_token_info_from_dexscreener(ca)
-    liq = (info.get("liquidity") or 0) or 0
-    vol24 = (info.get("volume24h") or 0) or 0
-
-    # Heuristic base prob
-    base_prob = 0.55
-    if src == "kol":
-        base_prob += 0.1
-    if liq and liq > 10000:
-        base_prob += 0.05
-    if vol24 and vol24 > 50000:
-        base_prob += 0.05
-    base_prob = float(max(0.0, min(0.95, base_prob)))
-
-    risk_ratio = 0.25
-    if liq and liq < 3000:
-        risk_ratio += 0.1
-
-    # Daily loss stop
-    today_pnl = get_today_pnl_sol()
-    if today_pnl <= -DAILY_LOSS_LIMIT_SOL:
-        print(f"[risk] Daily loss limit hit ({today_pnl:.4f} SOL). Skipping new trades today.")
-        break
-
-    trade_amount_lamports = int(current_capital_sol * 1e9)
-    trade_size_sol = trade_amount_lamports / 1e9
-
-    features = np.array([base_prob, risk_ratio, hour_sin, hour_cos, trade_size_sol, 0.0], dtype=float)
-    pred_p = _predict_success(model, features)
-
-    blended = 0.5 * base_prob + 0.5 * pred_p
-    do_trade = blended >= TRADE_THRESHOLD
-
-    if SIMULATION_MODE and do_trade:
-        new_cap, _gain = simulate_trade(current_capital_sol, base_prob, risk_ratio)
-        pnl = new_cap - current_capital_sol
-        daily_pnl_sol += pnl
-        current_capital_sol = new_cap
-        trades_today += 1
-        _insert_learn_event(datetime.now(), symbol, ca, base_prob, risk_ratio, trade_size_sol, pnl)
-    elif not SIMULATION_MODE and do_trade:
-        if wallet_info:
-            _ = place_live_swap(wallet_info[0], wallet_info[1], ca, trade_amount_lamports, symbol, ca, is_buy=True)
-        trades_today += 1
-        _insert_learn_event(datetime.now(), symbol, ca, base_prob, risk_ratio, trade_size_sol, 0.0)
-
-log_portfolio(current_capital_sol, daily_pnl_sol, trades_today)
-print(f"End of cycle — capital: {current_capital_sol:.4f} SOL | daily PnL: {daily_pnl_sol:.4f} SOL | trades: {trades_today}")
-
-===== Reporting & learning orchestration =====
-
-def update_labels(): pass  # labels created at insert time
-
-def _build_training_dataframe(): conn = sqlite3.connect(DB_FILE) df = pd.read_sql_query("SELECT * FROM learn_events ORDER BY timestamp ASC", conn, parse_dates=["timestamp"])  # type: ignore conn.close() if df.empty: return df df["hour_sin"] = np.sin(2 * np.pi * df["timestamp"].dt.hour / 24.0) df["hour_cos"] = np.cos(2 * np.pi * df["timestamp"].dt.hour / 24.0) df["size_norm"] = df["trade_size_sol"].clip(1e-6, None) df["pnl_roll"] = ( df.sort_values("timestamp").groupby("symbol")["pnl_sol"].rolling(window=5, min_periods=1).mean().reset_index(level=0, drop=True) ) feat = ["prob", "risk_ratio", "hour_sin", "hour_cos", "size_norm", "pnl_roll"] df[feat] = df[feat].astype(float).fillna(0.0) return df
-
-def train_model(): df = _build_training_dataframe() if df.empty or df["label"].sum() == 0: print("[learn] Not enough data to train yet.") if TORCH_OK and not os.path.exists(MODEL_PATH): torch.save(MemecoinPredictor().model.state_dict(), MODEL_PATH)  # type: ignore return X = df[["prob", "risk_ratio", "hour_sin", "hour_cos", "size_norm", "pnl_roll"]].values y = df["label"].values.astype(float) model = MemecoinPredictor(input_size=X.shape[1]) model.train(X, y, epochs=200, lr=1e-3)
-
-def daily_summary(): conn = sqlite3.connect(DB_FILE) df = pd.read_sql_query("SELECT * FROM learn_events WHERE DATE(timestamp)=DATE('now', 'localtime')", conn, parse_dates=["timestamp"])  # type: ignore conn.close() if df.empty: print("[summary] No learn events today yet.") return total = len(df) wins = int((df["pnl_sol"] > 0).sum()) pnl = float(df["pnl_sol"].sum()) wr = (wins / total) * 100.0 print(f"[summary] Today: trades={total}, wins={wins} ({wr:.1f}%), pnl={pnl:.4f} SOL")
-
-===== Emergency: sell then withdraw =====
-
-def emergency_withdrawal(wallet, connection): pin_input = input("Enter PIN to stop bot and withdraw funds: ") if pin_input != PIN: print("Invalid PIN. Withdrawal denied.") return print("PIN ok. Try sell‑then‑withdraw…")
-
-try:
+def get_recent_stats() -> dict:
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute("SELECT contract_address, symbol FROM trades WHERE outcome='OPEN' ORDER BY id DESC LIMIT 1")
+    c.execute(
+        """
+        SELECT prob, pnl_sol FROM learn_events
+        WHERE timestamp >= datetime('now', '-3 days')
+        """
+    )
+    rows = c.fetchall()
+    conn.close()
+
+    if not rows:
+        return {"count": 0, "win_rate": 0.6, "avg_prob": 0.75}
+
+    probs = np.array([r[0] for r in rows], dtype=float)
+    pnls = np.array([r[1] for r in rows], dtype=float)
+    wins = (pnls > 0).astype(float)
+
+    win_rate = float(wins.mean())
+    avg_prob = float(probs.mean())
+    return {"count": len(rows), "win_rate": win_rate, "avg_prob": avg_prob}
+
+
+def train_model_stub() -> None:
+    """Update threshold based on recent performance (very simple)."""
+    global TRADE_THRESHOLD
+    stats = get_recent_stats()
+    if stats["count"] == 0:
+        print("[learn] Not enough data yet.")
+        return
+
+    # If win rate is good, we can be a bit more aggressive; if bad, we tighten up.
+    base = 0.7
+    adjust = (0.5 - stats["win_rate"]) * 0.1
+    new_threshold = min(0.9, max(0.6, base + adjust))
+    print(
+        f"[learn] count={stats['count']} win_rate={stats['win_rate']:.2f} "
+        f"old_threshold={TRADE_THRESHOLD:.3f} new_threshold={new_threshold:.3f}"
+    )
+    TRADE_THRESHOLD = new_threshold
+
+# ---------- Solana / Jupiter helpers (for live mode) ----------
+
+
+def init_solana_wallet():
+    if not SOLANA_OK:
+        print("[wallet] Solana libs not available; forcing SIMULATION_MODE.")
+        return None, None
+
+    if not WALLET_PRIVATE_KEY:
+        print("[wallet] WALLET_PRIVATE_KEY not set; staying in SIMULATION_MODE.")
+        return None, None
+
+    try:
+        import base58 as _b58
+
+        secret_key_bytes = _b58.b58decode(WALLET_PRIVATE_KEY)
+        wallet = Keypair.from_secret_key(secret_key_bytes)
+        client = Client(SOLANA_RPC)
+        print(f"[wallet] Loaded wallet: {wallet.public_key}")
+        return wallet, client
+    except Exception as exc:
+        print(f"[wallet] Error loading wallet: {exc}")
+        return None, None
+
+
+def jupiter_quote(input_mint: str, output_mint: str, amount: int) -> dict:
+    url = f"{JUPITER_ENDPOINT}/quote"
+    params = {"inputMint": input_mint, "outputMint": output_mint, "amount": amount}
+    r = requests.get(url, params=params, timeout=10)
+    r.raise_for_status()
+    return r.json()
+
+
+async def _execute_swap(quote: dict, wallet: Keypair, client: Client) -> str:
+    swap_url = f"{JUPITER_ENDPOINT}/swap"
+    payload = {
+        "quoteResponse": quote,
+        "userPublicKey": str(wallet.public_key),
+        "wrapAndUnwrapSol": True,
+        "prioritizationFeeLamports": "auto",
+    }
+    r = requests.post(swap_url, json=payload, timeout=20)
+    r.raise_for_status()
+    swap_tx_buf = base64.b64decode(r.json()["swapTransaction"])
+    tx = VersionedTransaction.from_bytes(swap_tx_buf)
+    tx.sign([wallet])
+    sig = client.send_raw_transaction(bytes(tx))
+    print(f"[swap] sent tx: {sig.value}")
+    client.confirm_transaction(sig.value, commitment="confirmed")
+    return sig.value
+
+
+def place_live_swap(wallet: Keypair, client: Client, token_mint: str,
+                    amount_lamports: int, is_buy: bool) -> str | None:
+    try:
+        sol_mint = "So11111111111111111111111111111111111111112"
+        input_mint = sol_mint if is_buy else token_mint
+        output_mint = token_mint if is_buy else sol_mint
+        quote = jupiter_quote(input_mint, output_mint, amount_lamports)
+        sig = asyncio.run(_execute_swap(quote, wallet, client))
+        print(
+            f"[swap] {'BUY' if is_buy else 'SELL'} {amount_lamports / 1e9:.4f} SOL "
+            f"of token {token_mint}"
+        )
+        return sig
+    except Exception as exc:
+        print(f"[swap] error: {exc}")
+        return None
+
+# ---------- emergency withdrawal ----------
+
+
+def emergency_withdraw(wallet: Keypair, client: Client) -> None:
+    """Transfer almost all SOL to WITHDRAWAL_ADDRESS after PIN confirmation."""
+    if not wallet or not client:
+        print("[withdraw] No wallet/client; cannot withdraw.")
+        return
+
+    pin_in = input("Enter PIN to withdraw and stop bot: ").strip()
+    if pin_in != PIN:
+        print("[withdraw] Wrong PIN.")
+        return
+
+    if not WITHDRAWAL_ADDRESS:
+        print("[withdraw] WITHDRAWAL_ADDRESS not set.")
+        return
+
+    try:
+        bal_resp = client.get_balance(wallet.public_key)
+        lamports = bal_resp.value
+        print(f"[withdraw] balance = {lamports / 1e9:.4f} SOL")
+
+        # leave a little for fees
+        send_lamports = int(max(0, lamports - int(0.003 * 1e9)))
+
+        params = TransferParams(
+            from_pubkey=wallet.public_key,
+            to_pubkey=PublicKey(WITHDRAWAL_ADDRESS),
+            lamports=send_lamports,
+        )
+        ix = transfer(params)
+        recent = client.get_latest_blockhash().value.blockhash
+        msg = MessageV0.try_compile(
+            payer=wallet.public_key,
+            instructions=[ix],
+            address_lookup_table_accounts=[],
+            recent_blockhash=recent,
+        )
+        tx = VersionedTransaction(msg, [wallet])
+        sig = client.send_raw_transaction(bytes(tx))
+        client.confirm_transaction(sig.value)
+        print(f"[withdraw] sent {send_lamports / 1e9:.4f} SOL → {WITHDRAWAL_ADDRESS}")
+    except Exception as exc:
+        print(f"[withdraw] error: {exc}")
+
+# ---------- signal generation (stub for now) ----------
+
+
+def fetch_signals() -> list[tuple[str, str, float, float]]:
+    """
+    Return a list of (symbol, contract_address, prob, risk_ratio).
+
+    In a real version, this would call GMGN, PumpFun, Twitter, Dexscreener, etc.
+    For now we just create one fake 'signal' so the rest of the bot logic works.
+    """
+    symbol = "DEMO"
+    ca = "So11111111111111111111111111111111111111112"  # use wrapped SOL mint as dummy
+    prob = 0.8   # 80% confidence (fake)
+    risk_ratio = 0.1
+    return [(symbol, ca, prob, risk_ratio)]
+
+# ---------- trading core ----------
+
+
+def simulate_trade(current_sol: float, prob: float, risk_ratio: float) -> tuple[float, float]:
+    """
+    Very simple simulation:
+    - if prob is good, 86.2% return on the trade size
+    - else, small loss
+    - we cap daily loss using DAILY_LOSS_LIMIT_USD
+    """
+    trade_size_sol = current_sol  # all-in for the "extreme" challenge
+    if prob >= TRADE_THRESHOLD:
+        ret = 0.862
+    else:
+        ret = -0.2
+
+    pnl_sol = trade_size_sol * ret
+
+    # Cap single-trade loss to daily limit (in SOL)
+    max_loss_sol = DAILY_LOSS_LIMIT_USD / SOL_PRICE_USD
+    if pnl_sol < -max_loss_sol:
+        pnl_sol = -max_loss_sol
+
+    new_capital = current_sol + pnl_sol
+    return new_capital, pnl_sol
+
+
+def analyze_and_trade(wallet: Keypair | None, client: Client | None) -> None:
+    """Main per-cycle logic: fetch signals, maybe trade, update DB and stats."""
+    global current_capital_sol, today_pnl_sol, today_trade_count, today_date
+
+    # new day? log yesterday's portfolio and reset counters
+    if date.today() != today_date:
+        log_portfolio_for_day(today_date, current_capital_sol, today_pnl_sol, today_trade_count)
+        print(
+            f"[summary] {today_date.isoformat()} pnl={today_pnl_sol:.4f} "
+            f"SOL trades={today_trade_count}"
+        )
+        today_date = date.today()
+        today_pnl_sol = 0.0
+        today_trade_count = 0
+
+    print("[job] Fetching signals...")
+    signals = fetch_signals()
+    if not signals:
+        print("[job] No signals this cycle.")
+        return
+
+    for symbol, ca, prob, risk_ratio in signals:
+        print(
+            f"[signal] {symbol} ca={ca[:8]}... prob={prob:.3f} "
+            f"risk_ratio={risk_ratio:.3f} threshold={TRADE_THRESHOLD:.3f}"
+        )
+
+        if prob < TRADE_THRESHOLD:
+            print("[decision] Skip (probability below threshold).")
+            continue
+
+        trade_size_sol = current_capital_sol
+        if trade_size_sol <= 0:
+            print("[decision] No capital left; skipping.")
+            continue
+
+        ts = datetime.utcnow()
+
+        if SIMULATION_MODE or not wallet or not client:
+            new_capital, pnl_sol = simulate_trade(current_capital_sol, prob, risk_ratio)
+            print(
+                f"[SIM] traded {trade_size_sol:.4f} SOL, pnl={pnl_sol:.4f} "
+                f"SOL → new_capital={new_capital:.4f} SOL"
+            )
+            mode = "SIM"
+            current_capital_sol = new_capital
+        else:
+            lamports = int(trade_size_sol * 1e9)
+            sig = place_live_swap(wallet, client, ca, lamports, is_buy=True)
+            mode = "LIVE"
+            pnl_sol = 0.0  # we don't track real pnl here yet
+            print(f"[LIVE] swap tx={sig}, size={trade_size_sol:.4f} SOL")
+            # capital stays the same for now in this simple version
+
+        today_pnl_sol += pnl_sol
+        today_trade_count += 1
+
+        log_trade(
+            ts,
+            symbol,
+            ca,
+            "BUY",
+            trade_size_sol,
+            prob,
+            risk_ratio,
+            pnl_sol,
+            mode,
+        )
+        insert_learn_event(ts, symbol, ca, prob, risk_ratio, trade_size_sol, pnl_sol)
+
+        # extreme challenge: only 1 trade per cycle
+        break
+
+# ---------- daily summary & learning ----------
+
+
+def daily_summary_job() -> None:
+    """Print and log a simple daily summary (even if there were no trades)."""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute(
+        """
+        SELECT COALESCE(SUM(pnl_sol), 0), COUNT(*) FROM trades
+        WHERE date(ts) = date('now', 'utc')
+        """
+    )
     row = c.fetchone()
     conn.close()
-    if row:
-        ca, sym = row[0], row[1]
-        try:
-            place_live_swap(wallet, connection, ca, int(0.01 * 1e9), sym, ca, is_buy=False)
-            _close_open_trade(ca)
-        except Exception as e:
-            print(f"Sell attempt failed: {e}")
+    total_pnl, count = row if row else (0.0, 0)
+
+    print(
+        f"[summary] Today so far: trades={count} total_pnl={total_pnl:.4f} SOL "
+        f"(~${total_pnl * SOL_PRICE_USD:.2f})"
+    )
+
+
+def daily_learning_job() -> None:
+    print("[learn] Running daily learning job...")
+    train_model_stub()
+
+# ---------- main loop ----------
+
+
+def main() -> None:
+    print(
+        f"[start] Memebot starting | SIMULATION_MODE={SIMULATION_MODE} "
+        f"STARTING_SOL={STARTING_SOL:.4f}"
+    )
+    init_db()
+
+    wallet = None
+    client = None
+
+    if not SIMULATION_MODE and SOLANA_OK:
+        wallet, client = init_solana_wallet()
     else:
-        print("No OPEN trades recorded.")
-except Exception as e:
-    print(f"Open trade check error: {e}")
-
-if not WITHDRAWAL_ADDRESS:
-    print("WITHDRAWAL_ADDRESS not set.")
-    return
-try:
-    bal = connection.get_balance(wallet.public_key).value / 1e9
-    if bal > 0.01:
-        ix = transfer(TransferParams(from_pubkey=wallet.public_key, to_pubkey=PublicKey(WITHDRAWAL_ADDRESS), lamports=int((bal - 0.005) * 1e9)))
-        recent = connection.get_latest_blockhash().value.blockhash
-        msg = MessageV0.try_compile(payer=wallet.public_key, instructions=[ix], address_lookup_table_accounts=[], recent_blockhash=recent)
-        tx = VersionedTransaction(msg, [wallet])
-        txid = connection.send_raw_transaction(bytes(tx))
-        conf = connection.confirm_transaction(txid.value)
-        if not getattr(conf.value, "err", None):
-            print(f"Withdrew {bal:.4f} SOL to {WITHDRAWAL_ADDRESS}. TX: {txid.value}")
+        if SIMULATION_MODE:
+            print("[start] Simulation mode ON.")
         else:
-            print("Withdrawal failed.")
-except Exception as e:
-    print(f"Withdrawal error: {e}")
-print("Bot stopped.")
-raise SystemExit(0)
+            print("[start] Solana libs not available; staying in simulation mode.")
 
-===== Scheduler =====
+    if START_MODE == "withdraw":
+        if wallet and client:
+            emergency_withdraw(wallet, client)
+        else:
+            print("[withdraw] Cannot withdraw (no wallet/client).")
+        return
 
-def job(): print(f"Job start @ {datetime.now().isoformat(timespec='seconds')}") model = load_or_create_model() wallet_info = init_solana_wallet() if not SIMULATION_MODE else None analyze_token_success(wallet_info, model)
+    # schedule jobs
+    schedule.every(1).hours.do(lambda: analyze_and_trade(wallet, client))
+    schedule.every().day.at("23:59").do(daily_summary_job)
+    schedule.every().day.at("02:00").do(daily_learning_job)
 
-def main(): init_db()
+    # run one cycle immediately
+    analyze_and_trade(wallet, client)
 
-# Optional one‑shot withdrawal on boot
-if os.getenv("START_MODE", "start").lower() == "withdraw" and not SIMULATION_MODE and SOLANA_OK:
-    wi = init_solana_wallet()
-    if wi:
-        emergency_withdrawal(wi[0], wi[1])
-    return
-
-schedule.every(1).hours.do(job)
-schedule.every().day.at("02:00").do(lambda: (update_labels(), train_model()))
-schedule.every().day.at("23:59").do(daily_summary)
-
-job()  # run once now
-
-try:
+    # main loop
     while True:
         schedule.run_pending()
-        time.sleep(60)
-except KeyboardInterrupt:
-    print("Exiting…")
+        time.sleep(30)
 
-if name == "main": main()
+
+if __name__ == "__main__":
+    main()
