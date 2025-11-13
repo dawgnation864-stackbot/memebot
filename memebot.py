@@ -261,8 +261,7 @@ def jupiter_quote(input_mint: str, output_mint: str, amount: int) -> dict:
     r.raise_for_status()
     return r.json()
 
-
-async def _execute_swap(quote: dict, wallet: Keypair, client: Client) -> str:
+async def _execute_swap(quote: dict, wallet, client):
     swap_url = f"{JUPITER_ENDPOINT}/swap"
     payload = {
         "quoteResponse": quote,
@@ -281,7 +280,8 @@ async def _execute_swap(quote: dict, wallet: Keypair, client: Client) -> str:
     return sig.value
 
 
-def place_live_swap(wallet: Keypair, client: Client, token_mint: str,
+def place_live_swap(wallet, client, token_mint: str,
+                    amount_lamports: int, is_buy: bool):
                     amount_lamports: int, is_buy: bool) -> str | None:
     try:
         sol_mint = "So11111111111111111111111111111111111111112"
@@ -387,7 +387,7 @@ def simulate_trade(current_sol: float, prob: float, risk_ratio: float) -> tuple[
     return new_capital, pnl_sol
 
 
-def analyze_and_trade(wallet: Keypair | None, client: Client | None) -> None:
+def analyze_and_trade(wallet, client):
     """Main per-cycle logic: fetch signals, maybe trade, update DB and stats."""
     global current_capital_sol, today_pnl_sol, today_trade_count, today_date
 
