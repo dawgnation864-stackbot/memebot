@@ -261,6 +261,7 @@ def jupiter_quote(input_mint: str, output_mint: str, amount: int) -> dict:
     r.raise_for_status()
     return r.json()
 
+
 async def _execute_swap(quote: dict, wallet, client):
     swap_url = f"{JUPITER_ENDPOINT}/swap"
     payload = {
@@ -280,9 +281,8 @@ async def _execute_swap(quote: dict, wallet, client):
     return sig.value
 
 
-def place_live_swap(wallet, client, token_mint: str,
-                    amount_lamports: int, is_buy: bool):
-                    amount_lamports: int, is_buy: bool) -> str | None:
+def place_live_swap(wallet, client, token_mint: str, amount_lamports: int, is_buy: bool):
+    """Perform a live swap on Solana via Jupiter. Returns transaction signature or None."""
     try:
         sol_mint = "So11111111111111111111111111111111111111112"
         input_mint = sol_mint if is_buy else token_mint
@@ -301,7 +301,7 @@ def place_live_swap(wallet, client, token_mint: str,
 # ---------- emergency withdrawal ----------
 
 
-def emergency_withdraw(wallet: Keypair, client: Client) -> None:
+def emergency_withdraw(wallet, client) -> None:
     """Transfer almost all SOL to WITHDRAWAL_ADDRESS after PIN confirmation."""
     if not wallet or not client:
         print("[withdraw] No wallet/client; cannot withdraw.")
