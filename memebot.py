@@ -40,8 +40,9 @@ try:
     from solders.pubkey import Pubkey
 
     SOLANA_OK = True
-except Exception:
+except Exception as exc:
     SOLANA_OK = False
+    print(f"[solana] Import error: {exc!r}")
 
 # ---------- load .env ----------
 load_dotenv()
