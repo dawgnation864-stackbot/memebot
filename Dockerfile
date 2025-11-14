@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.10-slim
 
 # Make pip faster and less buggy
 ENV PIP_DEFAULT_TIMEOUT=120 \
@@ -8,21 +8,23 @@ ENV PIP_DEFAULT_TIMEOUT=120 \
 
 WORKDIR /app
 
-# Small system tools in case needed
+# Small system tools needed for building wheels (solders, etc.)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential pkg-config libssl-dev git curl \
+        build-essential pkg-config libssl-dev git curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy and install Python packages
+# Copy dependency list
 COPY requirements.txt /app/
 
+# Install Python packages (all requirements, including solana & solders)
 RUN python -m pip install --upgrade pip \
     && pip install --prefer-binary -r requirements.txt
 
 # Copy bot code
 COPY memebot.py /app/
 
-# Let Railway control SIMULATION_MODE via env var
+# Only set START_MODE here; SIMULATION_MODE is controlled via Railway env
 ENV START_MODE=start
 
+# Run the bot
 CMD ["python", "memebot.py"]
