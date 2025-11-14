@@ -8,23 +8,22 @@ ENV PIP_DEFAULT_TIMEOUT=120 \
 
 WORKDIR /app
 
-# Small system tools in case needed
+# Small system tools in case wheels are not available
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential pkg-config libssl-dev git \
     && rm -rf /var/lib/apt/lists/*
 
+# Copy requirements and install Python packages
 COPY requirements.txt /app/
 
-# Install Python packages
-
 RUN python -m pip install --upgrade pip \
-    && pip install --prefer-binary -r requirements.txt \
-    && pip install solana solders base58
+    && pip install --prefer-binary -r requirements.txt
+
+# Copy bot code
 COPY memebot.py /app/
 
-# REMOVE simulation default so Railway can control it
-# ENV SIMULATION_MODE=True   <-- delete this line completely
-
+# Railway will control SIMULATION_MODE via env vars,
+# so we DO NOT set it here.
 ENV START_MODE=start
 
 CMD ["python", "memebot.py"]
