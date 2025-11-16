@@ -30,14 +30,14 @@ from duckduckgo_search import DDGS  # currently unused but kept for future use
 
 # ---------- optional Solana / Jupiter stack ----------
 try:
-    from solana.keypair import Keypair
-    from solana.rpc.api import Client
-    from solana.publickey import PublicKey
-    from solana.system_program import TransferParams, transfer
-    from solders.transaction import VersionedTransaction
-    from solders.message import MessageV0
-    from solders.instruction import Instruction, AccountMeta
-    from solders.pubkey import Pubkey
+from solders.keypair import Keypair
+from solders.pubkey import Pubkey
+from solders.rpc.api import RpcClient
+from solders.rpc.types import TxOpts
+from solders.transaction import Transaction
+from solders.message import MessageV0
+from solders.instruction import Instruction, AccountMeta
+from solders.pubkey import Pubkey
 
     SOLANA_OK = True
 except Exception as exc:
