@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Memebot - Solana memecoin bot (cloud ready).
+"""
+Memebot - Solana memecoin bot (cloud ready).
 
 Educational example ONLY.
 Not financial advice. Extremely high risk. Never trade money you cannot lose.
@@ -30,16 +31,18 @@ from duckduckgo_search import DDGS  # currently unused but kept for future use
 
 # ---------- optional Solana / Jupiter stack ----------
 try:
-from solders.keypair import Keypair
-from solders.pubkey import Pubkey
-from solders.rpc.api import RpcClient
-from solders.rpc.types import TxOpts
-from solders.transaction import Transaction
-from solders.message import MessageV0
-from solders.instruction import Instruction, AccountMeta
-from solders.pubkey import Pubkey
+    # Keypair comes from solders, RPC client & system_program from solana
+    from solders.keypair import Keypair
+    from solders.pubkey import Pubkey
+    from solana.rpc.api import Client
+    from solana.publickey import PublicKey
+    from solana.system_program import TransferParams, transfer
+    from solders.transaction import VersionedTransaction
+    from solders.message import MessageV0
+    from solders.instruction import Instruction, AccountMeta
 
     SOLANA_OK = True
+    print("[solana] Solana/Jupiter libraries loaded OK.")
 except Exception as exc:
     SOLANA_OK = False
     print(f"[solana] Import error: {exc!r}")
