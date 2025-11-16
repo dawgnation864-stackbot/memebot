@@ -28,7 +28,6 @@ import pandas as pd
 import schedule
 from dotenv import load_dotenv
 from duckduckgo_search import DDGS  # currently unused but kept for future use
-
 # ---------- optional Solana / Jupiter stack ----------
 try:
     # Keypair comes from solders, RPC client & system_program from solana
@@ -43,6 +42,13 @@ try:
 
     SOLANA_OK = True
     print("[solana] Solana/Jupiter libraries loaded OK.")
+except Exception as exc:
+    SOLANA_OK = False
+    print(f"[solana] Import error: {exc!r}")
+except Exception as exc:
+    SOLANA_OK = False
+    print(f"[solana] Import error: {exc!r}")
+ 
 except Exception as exc:
     SOLANA_OK = False
     print(f"[solana] Import error: {exc!r}")
