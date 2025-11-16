@@ -45,13 +45,6 @@ try:
 except Exception as exc:
     SOLANA_OK = False
     print(f"[solana] Import error: {exc!r}")
-except Exception as exc:
-    SOLANA_OK = False
-    print(f"[solana] Import error: {exc!r}")
- 
-except Exception as exc:
-    SOLANA_OK = False
-    print(f"[solana] Import error: {exc!r}")
 
 # ---------- load .env ----------
 load_dotenv()
