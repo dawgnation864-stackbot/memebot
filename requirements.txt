@@ -2,7 +2,11 @@ requests
 httpx
 pydantic
 python-dotenv
+schedule
+duckduckgo-search
 solana==0.30.2
-solders<0.19.0,>=0.18.0
+solders>=0.18.0,<0.19.0
 construct-typing
 numpy
+pandas
+base58
