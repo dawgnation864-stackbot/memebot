@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Memebot - Solana memecoin bot (cloud ready).
+Memebot - Solana memecoin bot (cloud-ready, live-capable).
 
-Educational example ONLY.
-Not financial advice. Extremely high risk. Never trade money you cannot lose.
+EDUCATIONAL EXAMPLE ONLY.
+NOT FINANCIAL ADVICE. EXTREMELY HIGH RISK.
 
-To RUN LIVE you must:
+To trade for real you MUST:
 - Set SIMULATION_MODE=False in environment variables
-- Set WALLET_PRIVATE_KEY (base58, NEVER share it with anyone)
-- Set WITHDRAWAL_ADDRESS (your Solana address)
+- Set WALLET_PRIVATE_KEY (base58) and WITHDRAWAL_ADDRESS
+- Fund the wallet with SOL and understand the risks
 """
 
 from __future__ import annotations
@@ -27,24 +27,25 @@ import numpy as np
 import pandas as pd
 import schedule
 from dotenv import load_dotenv
-from duckduckgo_search import DDGS  # placeholder for future signal logic
-import base58
+from duckduckgo_search import DDGS  # currently unused, placeholder for future signals
 
 # ---------- optional Solana / Jupiter stack ----------
+SOLANA_OK = False
 try:
-    # Solders (transactions, keypairs) + solana-py client
+    # RPC client (HTTP)
+    from solana.rpc.api import Client
+
+    # Solders primitives for signing v0 transactions
     from solders.keypair import Keypair
-    from solders.pubkey import Pubkey
     from solders.transaction import VersionedTransaction
     from solders.message import MessageV0
-    from solana.rpc.api import Client
-    from solana.system_program import TransferParams, transfer
+    from solders.pubkey import Pubkey
 
     SOLANA_OK = True
-    print("[solana] Python Solana libs imported successfully.")
 except Exception as exc:
-    SOLANA_OK = False
+    # If ANY of these fail, we log and stay in simulation (or hard-fail if SIM=False)
     print(f"[solana] Import error: {exc!r}")
+    SOLANA_OK = False
 
 # ---------- load .env ----------
 load_dotenv()
@@ -256,9 +257,13 @@ def train_model_stub() -> None:
 
 
 def init_solana_wallet():
-    """Load wallet from WALLET_PRIVATE_KEY if libs and key are available."""
+    """
+    Load wallet from WALLET_PRIVATE_KEY if libs and key are available.
+
+    Returns (wallet, client) or (None, None) on failure.
+    """
     if not SOLANA_OK:
-        print("[wallet] SOLANA_OK=False (import failed); cannot go live.")
+        print("[wallet] Solana libs not available; cannot go live.")
         return None, None
 
     if not WALLET_PRIVATE_KEY:
@@ -266,13 +271,15 @@ def init_solana_wallet():
         return None, None
 
     try:
-        secret_key_bytes = base58.b58decode(WALLET_PRIVATE_KEY)
+        import base58 as _b58
+
+        secret_key_bytes = _b58.b58decode(WALLET_PRIVATE_KEY)
         wallet = Keypair.from_bytes(secret_key_bytes)
         client = Client(SOLANA_RPC)
         print(f"[wallet] Loaded wallet: {wallet.pubkey()}")
         return wallet, client
     except Exception as exc:
-        print(f"[wallet] Error loading wallet from WALLET_PRIVATE_KEY: {exc!r}")
+        print(f"[wallet] Error loading wallet: {exc}")
         return None, None
 
 
@@ -299,9 +306,13 @@ async def _execute_swap(quote: dict, wallet, client) -> str:
     tx = VersionedTransaction.from_bytes(swap_tx_buf)
     tx.sign([wallet])
     sig = client.send_raw_transaction(bytes(tx))
-    print(f"[swap] sent tx: {sig}")
-    client.confirm_transaction(sig)
-    return str(sig)
+    print(f"[swap] sent tx: {sig['result']}")
+    # best-effort confirmation
+    try:
+        client.confirm_transaction(sig["result"], commitment="confirmed")
+    except Exception as exc:
+        print(f"[swap] confirm error: {exc}")
+    return sig["result"]
 
 
 def place_live_swap(
@@ -320,14 +331,19 @@ def place_live_swap(
         )
         return sig
     except Exception as exc:
-        print(f"[swap] error: {exc!r}")
+        print(f"[swap] error: {exc}")
         return None
 
 # ---------- emergency withdrawal ----------
 
 
 def emergency_withdraw(wallet, client) -> None:
-    """Transfer almost all SOL to WITHDRAWAL_ADDRESS after PIN confirmation."""
+    """
+    Transfer almost all SOL to WITHDRAWAL_ADDRESS after PIN confirmation.
+
+    NOTE: This lazily imports system_program so that any bugs there
+    do NOT break normal trading imports.
+    """
     if not wallet or not client:
         print("[withdraw] No wallet/client; cannot withdraw.")
         return
@@ -342,6 +358,13 @@ def emergency_withdraw(wallet, client) -> None:
         return
 
     try:
+        from solana.system_program import TransferParams, transfer
+        from solana.publickey import PublicKey
+    except Exception as exc:
+        print(f"[withdraw] system_program import failed: {exc}")
+        return
+
+    try:
         bal_resp = client.get_balance(wallet.pubkey())
         lamports = bal_resp["result"]["value"]
         print(f"[withdraw] balance = {lamports / 1e9:.4f} SOL")
@@ -350,7 +373,7 @@ def emergency_withdraw(wallet, client) -> None:
 
         params = TransferParams(
             from_pubkey=wallet.pubkey(),
-            to_pubkey=Pubkey.from_string(WITHDRAWAL_ADDRESS),
+            to_pubkey=PublicKey(WITHDRAWAL_ADDRESS),
             lamports=send_lamports,
         )
         ix = transfer(params)
@@ -363,12 +386,12 @@ def emergency_withdraw(wallet, client) -> None:
         )
         tx = VersionedTransaction(msg, [wallet])
         sig = client.send_raw_transaction(bytes(tx))
-        client.confirm_transaction(sig)
+        client.confirm_transaction(sig["result"])
         print(
             f"[withdraw] sent {send_lamports / 1e9:.4f} SOL → {WITHDRAWAL_ADDRESS}"
         )
     except Exception as exc:
-        print(f"[withdraw] error: {exc!r}")
+        print(f"[withdraw] error: {exc}")
 
 # ---------- signal generation (stub) ----------
 
@@ -393,7 +416,7 @@ def simulate_trade(
     current_sol: float, prob: float, risk_ratio: float
 ) -> tuple[float, float]:
     """
-    Very simple simulation:
+    Very simple simulation for the challenge:
     - if prob is good, +86.2% on the trade size
     - else, -20%
     - single-trade loss is capped by DAILY_LOSS_LIMIT_USD
@@ -440,8 +463,8 @@ def analyze_and_trade(wallet, client) -> None:
 
     for symbol, ca, prob, risk_ratio in signals:
         print(
-            f"[signal] {symbol} prob={prob:.3f} "
-            f"threshold={TRADE_THRESHOLD:.3f}"
+            f"[signal] {symbol} ca={ca[:8]}... prob={prob:.3f} "
+            f"risk_ratio={risk_ratio:.3f} threshold={TRADE_THRESHOLD:.3f}"
         )
 
         if prob < TRADE_THRESHOLD:
@@ -455,7 +478,7 @@ def analyze_and_trade(wallet, client) -> None:
 
         ts = datetime.utcnow()
 
-        if SIMULATION_MODE:
+        if SIMULATION_MODE or not wallet or not client:
             new_capital, pnl_sol = simulate_trade(current_capital_sol, prob, risk_ratio)
             print(
                 f"[SIM] traded {trade_size_sol:.4f} SOL, pnl={pnl_sol:.4f} "
@@ -529,11 +552,18 @@ def main() -> None:
     client = None
 
     if not SIMULATION_MODE:
+        if not SOLANA_OK:
+            print("[wallet] SOLANA_OK=False (import failed); cannot go live.")
+            print(
+                "[fatal] SIMULATION_MODE=False but wallet/client not available "
+                "instead of running in simulation."
+            )
+            return
         wallet, client = init_solana_wallet()
         if not wallet or not client:
             print(
-                "[fatal] SIMULATION_MODE=False but wallet/client not available. "
-                "Exiting instead of running in simulation."
+                "[fatal] SIMULATION_MODE=False but wallet/client not available "
+                "instead of running in simulation."
             )
             return
     else:
