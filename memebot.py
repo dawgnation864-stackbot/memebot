@@ -36,12 +36,13 @@ try:
     from solana.publickey import PublicKey
     from solana.system_program import TransferParams, transfer
 
-    # solders types for newer Jupiter tx format
+    # solders key types (used for the wallet)
     from solders.keypair import Keypair
-    from solders.transaction import VersionedTransaction
-    from solders.message import MessageV0
-    from solders.instruction import Instruction, AccountMeta
-    from solders.pubkey import Pubkey as SoldersPubkey
+    from solders.pubkey import Pubkey
+
+    # Versioned transactions come from solana-py, NOT solders
+    from solana.transaction import VersionedTransaction
+    from solana.message import MessageV0
 
     SOLANA_OK = True
 except Exception as exc:
