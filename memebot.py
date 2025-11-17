@@ -12,6 +12,10 @@ To trade for real you MUST:
 """
 
 from __future__ import annotations
+import sys
+
+print(">>> memebot.py started (top of file reached)")
+sys.stdout.flush()
 
 # ---------- standard library imports ----------
 import os
