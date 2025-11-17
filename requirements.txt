@@ -1,9 +1,9 @@
 requests
 numpy
 pandas
-schedule
 python-dotenv
+schedule
 duckduckgo-search
-solana
-solders
+solana==0.30.2
+solders==0.18.1
 base58
