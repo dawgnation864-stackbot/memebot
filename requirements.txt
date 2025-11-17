@@ -11,3 +11,4 @@ anyio
 websockets
 httpx
 python-dateutil
+solders==0.18.1
