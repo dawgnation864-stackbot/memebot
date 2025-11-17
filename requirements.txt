@@ -4,7 +4,6 @@ schedule
 duckduckgo-search
 numpy
 pandas
-sqlite3-binary
 base58
 construct
 solana
