@@ -31,14 +31,10 @@ from duckduckgo_search import DDGS  # currently unused but kept for future use
 # ---------- optional Solana / Jupiter stack ----------
 try:
     # Keypair comes from solders, RPC client & system_program from solana
-    from solders.keypair import Keypair
-    from solders.pubkey import Pubkey
-    from solana.rpc.api import Client
-    from solana.publickey import PublicKey
-    from solana.system_program import TransferParams, transfer
-    from solders.transaction import VersionedTransaction
-    from solders.message import MessageV0
-    from solders.instruction import Instruction, AccountMeta
+from solana.keypair import Keypair
+from solana.rpc.api import Client
+from solana.publickey import PublicKey
+from solana.transaction import Transaction
 
     SOLANA_OK = True
     print("[solana] Solana/Jupiter libraries loaded OK.")
@@ -256,6 +252,22 @@ def train_model_stub() -> None:
 
 
 def init_solana_wallet():
+    if not WALLET_PRIVATE_KEY:
+        print("[wallet] WALLET_PRIVATE_KEY not set; staying in simulation mode.")
+        return None, None
+
+    try:
+        from base58 import b58decode
+
+        secret = b58decode(WALLET_PRIVATE_KEY)
+        wallet = Keypair.from_secret_key(secret)
+        client = Client(SOLANA_RPC)
+
+        print(f"[wallet] Loaded wallet: {wallet.public_key}")
+        return wallet, client
+    except Exception as exc:
+        print(f"[wallet] Error loading wallet: {exc}")
+        return None, None
     """Load wallet from WALLET_PRIVATE_KEY if libs and key are available."""
     if not SOLANA_OK:
         print("[wallet] Solana libs not available; staying in simulation mode.")
