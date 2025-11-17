@@ -28,15 +28,20 @@ import schedule
 from dotenv import load_dotenv
 from duckduckgo_search import DDGS  # not used yet but kept for future
 
-# ---------- optional Solana / solders stack ----------
+# ---------- optional Solana / Jupiter support ----------
 SOLANA_OK = False
 try:
+    # solana-py client + system program
+    from solana.rpc.api import Client as RpcClient
+    from solana.publickey import PublicKey
+    from solana.system_program import TransferParams, transfer
+
+    # solders types for newer Jupiter tx format
     from solders.keypair import Keypair
-    from solders.pubkey import Pubkey
-    from solders.rpc.api import Client as RpcClient
     from solders.transaction import VersionedTransaction
     from solders.message import MessageV0
-    from solders.system_program import transfer, TransferParams
+    from solders.instruction import Instruction, AccountMeta
+    from solders.pubkey import Pubkey as SoldersPubkey
 
     SOLANA_OK = True
 except Exception as exc:
