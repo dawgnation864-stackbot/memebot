@@ -4,6 +4,5 @@ pandas
 python-dotenv
 schedule
 duckduckgo-search
-solana==0.30.2
-solders==0.18.1
 base58
+solana==0.30.2
