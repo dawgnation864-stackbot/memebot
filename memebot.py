@@ -4,8 +4,8 @@ MemeBot – aggressive Solana memecoin bot for Railway + Jupiter
 ENV VARIABLES (Railway → Variables):
 
 # core run modes
-SIMULATION_MODE        -> "False"   (string "True" or "False")
-START_MODE             -> "start"   (or "withdraw")
+SIMULATION_MODE        -> "False" or "True"      (string)
+START_MODE             -> "start" or "withdraw"
 
 # wallet / RPC
 WALLET_PRIVATE_KEY     -> base58-encoded secret key (NOT your seed phrase)
@@ -15,7 +15,7 @@ WITHDRAWAL_ADDRESS     -> your Solana address for emergency withdraws
 # risk / sizing
 STARTING_SOL           -> e.g. 0.4000
 DAILY_LOSS_LIMIT_USD   -> e.g. 25
-SOL_PRICE_USD          -> e.g. 180  (used just for rough PnL calc)
+SOL_PRICE_USD          -> e.g. 180   (rough PnL calc)
 MAX_TRADE_RISK_SOL     -> e.g. 0.40
 TAKE_PROFIT_MULT       -> e.g. 2.0   (2x)
 STOP_LOSS_MULT         -> e.g. 0.5   (-50%)
@@ -25,14 +25,14 @@ MIN_PROBABILITY        -> e.g. 0.70
 SCAN_INTERVAL_SECONDS  -> e.g. 60
 
 # Jupiter
-JUPITER_ENDPOINT       -> https://quote-api.jup.ag/ultra
-JUPITER_API_KEY = os.getenv("JUPITER_API_KEY", "").strip()
-JUPITER_API_BASE = os.getenv("JUPITER_API_BASE", "https://api.jup.ag")
+JUPITER_ENDPOINT       -> your Ultra endpoint, e.g. https://api.jup.ag/ultra
+JUPITER_API_BASE       -> (optional) if empty, defaults to JUPITER_ENDPOINT
+JUPITER_API_KEY        -> your Jupiter API key (string)
 
 # safety / misc
 PIN                    -> any 4–6 digit number you set (for future controls)
 NEGATIVE_KEYWORDS      -> comma list, e.g. "honeypot,scam,rugpull"
-MEME_TOKENS            -> optional comma list of mint addresses; if empty, defaults in code below
+MEME_TOKENS            -> optional comma list of "NAME:mint" or just "mint"
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ import asyncio
 import base64
 import time
 from datetime import datetime
-from typing import List, Dict, Any
+from typing import Dict, Any, List, Optional
 
 # ---------- third-party imports ----------
 import requests
@@ -69,7 +69,7 @@ except Exception as exc:
 # ---------- load env ----------
 load_dotenv()
 
-# ---------- configuration from env ----------
+# ---------- helpers for env parsing ----------
 
 def env_bool(name: str, default: bool) -> bool:
     return os.getenv(name, str(default)).strip().lower() in {"1", "true", "yes", "y"}
@@ -79,6 +79,8 @@ def env_float(name: str, default: float) -> float:
         return float(os.getenv(name, str(default)))
     except Exception:
         return default
+
+# ---------- configuration from env ----------
 
 SIMULATION_MODE = env_bool("SIMULATION_MODE", True)
 START_MODE = os.getenv("START_MODE", "start").strip().lower()
@@ -97,29 +99,37 @@ STOP_LOSS_MULT = env_float("STOP_LOSS_MULT", 0.5)
 MIN_PROBABILITY = env_float("MIN_PROBABILITY", 0.7)
 SCAN_INTERVAL_SECONDS = int(env_float("SCAN_INTERVAL_SECONDS", 60))
 
-JUPITER_ENDPOINT = os.getenv("JUPITER_ENDPOINT", "https://quote-api.jup.ag").rstrip("/")
+# Jupiter config
+JUPITER_ENDPOINT = os.getenv("JUPITER_ENDPOINT", "https://api.jup.ag").rstrip("/")
+JUPITER_API_BASE = os.getenv("JUPITER_API_BASE", JUPITER_ENDPOINT).rstrip("/")
+JUPITER_API_KEY = os.getenv("JUPITER_API_KEY", "").strip()
 
+# misc
 PIN_CODE = os.getenv("PIN", "0000").strip()
-NEGATIVE_KEYWORDS = [k.strip().lower() for k in os.getenv("NEGATIVE_KEYWORDS", "").split(",") if k.strip()]
+NEGATIVE_KEYWORDS = [
+    k.strip().lower()
+    for k in os.getenv("NEGATIVE_KEYWORDS", "").split(",")
+    if k.strip()
+]
 
-# Aggressive default meme list – these are EXAMPLES and will change in real life.
+# ---------- aggressive default meme list (examples) ----------
+
 DEFAULT_MEME_TOKENS: Dict[str, str] = {
-    # name               # mint address (examples; replace with real current ones you like)
-    "BONK": "DezXAFuB81om4uPCecv9hVb2tSCD5qLQJd4d8zF9CqY",
-    "WIF":  "8bF4uoN9kUQJeVX5TR1fURCa8yE1xHd2h9kPGfiVNN7E",
+    "BONK":   "DezXAFuB81om4uPCecv9hVb2tSCD5qLQJd4d8zF9CqY",
+    "WIF":    "8bF4uoN9kUQJeVX5TR1fURCa8yE1xHd2h9kPGfiVNN7E",
     "POPCAT": "7aKxL5D2UzmkFbnxgSJ8tkWPcShM3SPWwHgvxCrkvV2n",
-    "MEW": "9n4nbM75f5Ui33ZbPYXn59EwSgE8CGsHtAeTH5YFeJ9E",
-    "MYRO": "2RSuB8m67xY7qsKC3gQeHTFfaR9EMgrFHafpXp1em2aH",
-    "BOME": "3gqVdsn9D1Gn28AL5soMgqd7qV3CyMfCVxYjByBPjVAk",
-    "JEETS": "2JTSi9b3n9ee2YdzPjhzPa1L1kUD9z3iKnB2jPSj7uw6",
-    "SLERF": "A5FK5GRnmt1vGjNFH6G6Dq3uTJS3BM4tiTnC5NzJctqv",
-    "PENG": "9PENGQk3R3ZkN93Bp96rKMgVx7QiZfq8np5xpoE2mR7S",
-    "DOGWIF": "8R4uKYFAsWwMje1UY6nQqXFz3vGN9VxnB3k5ufs5pFhF",
-    "SAMO": "7xKXtg2s9mLMpTq2s93iDby5SLmtAoeJbY7aHedj5Lwa",
-    "CHONK": "4CHoNkWzHe9aVq4p6ZtUZmW8Py46nCTaPPnnw6G7xJtP",
-    "TURBO": "2TuRBoS4Gf1HeLenp8QxR3cWsvtT2mG5DeADP4bVpFXZ",
-    "FLOKI": "3k5Flokie3RX2iYp7Gx5oBJNrCaLCSv6iQFZjHzKzJk6",
-    "MOODENG": "8Mo0DenGkGSzaRN3qHYpVXyPDbL3U5eScVn2RZLXg726",
+    "MEW":    "9n4nbM75f5Ui33ZbPYXn59EwSgE8CGsHtAeTH5YFeJ9E",
+    "MYRO":   "2RSuB8m67xY7qsKC3gQeHTFfaR9EMgrFHafpXp1em2aH",
+    "BOME":   "3gqVdsn9D1Gn28AL5soMgqd7qV3CyMfCVxYjByBPjVAk",
+    "JEETS":  "2JTSi9b3n9ee2YdzPjhzPa1L1kUD9z3iKnB2jPSj7uw6",
+    "SLERF":  "A5FK5GRnmt1vGjNFH6G6Dq3uTJS3BM4tiTnC5NzJctqv",
+    "PENG":   "9PENGQk3R3ZkN93Bp96rKMgVx7QiZfq8np5xpoE2mR7S",
+    "DOGWIF":"8R4uKYFAsWwMje1UY6nQqXFz3vGN9VxnB3k5ufs5pFhF",
+    "SAMO":   "7xKXtg2s9mLMpTq2s93iDby5SLmtAoeJbY7aHedj5Lwa",
+    "CHONK":  "4CHoNkWzHe9aVq4p6ZtUZmW8Py46nCTaPPnnw6G7xJtP",
+    "TURBO":  "2TuRBoS4Gf1HeLenp8QxR3cWsvtT2mG5DeADP4bVpFXZ",
+    "FLOKI":  "3k5Flokie3RX2iYp7Gx5oBJNrCaLCSv6iQFZjHzKzJk6",
+    "MOODENG":"8Mo0DenGkGSzaRN3qHYpVXyPDbL3U5eScVn2RZLXg726",
 }
 
 MEME_TOKENS_ENV = os.getenv("MEME_TOKENS", "").strip()
@@ -129,7 +139,6 @@ if MEME_TOKENS_ENV:
         part = raw.strip()
         if not part:
             continue
-        # allow "NAME:mint" or just "mint"
         if ":" in part:
             name, mint = [p.strip() for p in part.split(":", 1)]
             MEME_TOKENS[name or mint] = mint
@@ -139,10 +148,9 @@ else:
     MEME_TOKENS = DEFAULT_MEME_TOKENS
 
 # ---------- state ----------
-balance_sol = STARTING_SOL
+balance_sol: float = STARTING_SOL
 start_day = datetime.utcnow().date()
-realized_pnl_usd = 0.0
-
+realized_pnl_usd: float = 0.0
 
 # ---------- Solana / Jupiter helpers ----------
 
@@ -169,7 +177,7 @@ def init_solana_wallet():
         return None, None
 
 
-def jupiter_request(path: str, params: dict):
+def jupiter_request(path: str, params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """
     Generic helper for Jupiter API requests.
     Automatically injects API key + correct endpoint.
@@ -180,28 +188,43 @@ def jupiter_request(path: str, params: dict):
     headers = {
         "Content-Type": "application/json",
     }
-
-    # Add Jupiter API key
     if JUPITER_API_KEY:
         headers["Authorization"] = f"Bearer {JUPITER_API_KEY}"
 
     try:
-        resp = requests.get(url, params=params, headers=headers, timeout=10)
+        resp = requests.get(url, params=params, headers=headers, timeout=15)
         resp.raise_for_status()
         return resp.json()
-        
     except Exception as exc:
         print(f"[swap] quote error: {exc!r}")
         return None
 
 
-def jupiter_swap(wallet: Keypair, client: RpcClient, route: Dict[str, Any]) -> str | None:
+def jupiter_quote(input_mint: str, output_mint: str, amount_lamports: int) -> Optional[Dict[str, Any]]:
+    """
+    Call Jupiter /v6/quote and return the full quote JSON
+    (which we then pass directly into /v6/swap).
+    """
+    params = {
+        "inputMint": input_mint,
+        "outputMint": output_mint,
+        "amount": amount_lamports,
+        "slippageBps": 500,
+        "onlyDirectRoutes": "false",
+    }
+    data = jupiter_request("/v6/quote", params)
+    if not data:
+        return None
+    return data
+
+
+def jupiter_swap(wallet: Keypair, client: RpcClient, route: Dict[str, Any]) -> Optional[str]:
     """
     Submit a Jupiter swap using /v6/swap.
-    If anything fails, we just log the error and return None (no funds moved).
+    If anything fails, we just log the error and return None.
     """
     try:
-        url = f"{JUPITER_ENDPOINT}/v6/swap"
+        url = f"{JUPITER_API_BASE}/v6/swap"
         user_pubkey = str(wallet.pubkey())
         payload = {
             "quoteResponse": route,
@@ -218,8 +241,6 @@ def jupiter_swap(wallet: Keypair, client: RpcClient, route: Dict[str, Any]) -> s
         swap_tx = data["swapTransaction"]
         raw_tx = base64.b64decode(swap_tx)
 
-        # We *should* deserialize, sign, and re-serialize, but that is complex.
-        # As a compromise, we attempt to send raw. If cluster rejects it, we log and move on.
         send_resp = client.send_raw_transaction(raw_tx)
         sig = send_resp["result"]
         print(f"[swap] submitted tx: {sig}")
@@ -228,10 +249,9 @@ def jupiter_swap(wallet: Keypair, client: RpcClient, route: Dict[str, Any]) -> s
         print(f"[swap] swap error: {exc!r}")
         return None
 
-
 # ---------- signal + trading logic ----------
 
-def sample_signal() -> Dict[str, Any] | None:
+def sample_signal() -> Optional[Dict[str, Any]]:
     """
     Very simple 'aggressive' signal generator:
     - picks a random meme from list
@@ -336,14 +356,12 @@ def trade_once():
         print("[live] Swap failed; no funds moved (as far as we know).")
         return
 
-    # For now we don't calculate real on-chain PnL; just log:
     print(f"[LIVE] swap submitted for {trade_size_sol:.4f} SOL into {name} mint={mint}, tx={sig}")
-
 
 # ---------- main loop ----------
 
 def main():
-    print(f">>> memebot.py started (top of file reached)")
+    print(">>> memebot.py started (top of file reached)")
     print(
         f"[start] MemeBot | SIM={SIMULATION_MODE} | "
         f"START={STARTING_SOL:.4f} SOL | MODE={START_MODE}"
@@ -367,7 +385,6 @@ def main():
     while True:
         schedule.run_pending()
         time.sleep(1)
-
 
 if __name__ == "__main__":
     main()
