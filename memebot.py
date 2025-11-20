@@ -167,24 +167,27 @@ def init_solana_wallet():
         return None, None
 
 
-def jupiter_quote(input_mint: str, output_mint: str, amount_in_lamports: int) -> Dict[str, Any] | None:
-    """Get a Jupiter v6 quote."""
+def jupiter_request(path: str, params: dict):
+    """
+    Generic helper for Jupiter API requests.
+    Automatically injects API key + correct endpoint.
+    """
+    base = JUPITER_API_BASE.rstrip("/")
+    url = f"{base}{path}"
+
+    headers = {
+        "Content-Type": "application/json",
+    }
+
+    # Add Jupiter API key
+    if JUPITER_API_KEY:
+        headers["Authorization"] = f"Bearer {JUPITER_API_KEY}"
+
     try:
-        url = f"{JUPITER_ENDPOINT}/v6/quote"
-        params = {
-            "inputMint": input_mint,
-            "outputMint": output_mint,
-            "amount": str(amount_in_lamports),
-            "slippageBps": "500",  # 5%
-            "onlyDirectRoutes": "false",
-        }
-        resp = requests.get(url, params=params, timeout=15)
+        resp = requests.get(url, params=params, headers=headers, timeout=10)
         resp.raise_for_status()
-        data = resp.json()
-        if not data or "data" not in data or not data["data"]:
-            print("[swap] No routes returned from Jupiter.")
-            return None
-        return data["data"][0]
+        return resp.json()
+        
     except Exception as exc:
         print(f"[swap] quote error: {exc!r}")
         return None
