@@ -25,7 +25,7 @@ MIN_PROBABILITY        -> e.g. 0.70
 SCAN_INTERVAL_SECONDS  -> e.g. 60
 
 # Jupiter
-JUPITER_ENDPOINT       -> https://quote-api.jup.ag
+JUPITER_ENDPOINT       -> https://api.jup.ag
 
 # safety / misc
 PIN                    -> any 4–6 digit number you set (for future controls)
@@ -95,7 +95,7 @@ STOP_LOSS_MULT = env_float("STOP_LOSS_MULT", 0.5)
 MIN_PROBABILITY = env_float("MIN_PROBABILITY", 0.7)
 SCAN_INTERVAL_SECONDS = int(env_float("SCAN_INTERVAL_SECONDS", 60))
 
-JUPITER_ENDPOINT = os.getenv("JUPITER_ENDPOINT", "https://quote-api.jup.ag").rstrip("/")
+JUPITER_ENDPOINT = os.getenv("JUPITER_ENDPOINT", "https://api.jup.ag").rstrip("/")
 
 PIN_CODE = os.getenv("PIN", "0000").strip()
 NEGATIVE_KEYWORDS = [k.strip().lower() for k in os.getenv("NEGATIVE_KEYWORDS", "").split(",") if k.strip()]
