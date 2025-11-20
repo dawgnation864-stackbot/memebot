@@ -6,7 +6,7 @@ numpy
 pandas
 base58
 construct
-solders
+solders==0.20.0
 anyio
 websockets
 httpx
