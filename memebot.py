@@ -1,570 +1,416 @@
-#!/usr/bin/env python3
 """
-Memebot - Solana memecoin bot (cloud ready).
+Memebot – Solana memecoin bot using Jupiter v6
 
-Educational example ONLY.
-Not financial advice. Extremely high risk. Never trade money you cannot lose.
+Key points:
+- Uses Jupiter v6 HTTP API (quote + swap) for swaps.
+- Uses solders only (no solana-py).
+- Can run in simulation or live mode, controlled by SIMULATION_MODE env var.
+- Reads all configuration from environment variables (Railway service variables).
 
-To run live:
-- set SIMULATION_MODE=False in environment variables
-- set WALLET_PRIVATE_KEY (base58) and WITHDRAWAL_ADDRESS
+Environment variables (all strings):
+
+  SIMULATION_MODE        -> "True" (default) or "False"
+  START_MODE             -> "start" (default) or "withdraw"
+
+  STARTING_SOL           -> e.g. "0.4000"
+  STARTING_USD           -> e.g. "100"
+  DAILY_LOSS_LIMIT_USD   -> e.g. "25"
+  MAX_TRADE_RISK_SOL     -> e.g. "0.4"
+  MIN_PROBABILITY        -> e.g. "0.72"
+  STOP_LOSS_MULT         -> e.g. "0.97"
+  TAKE_PROFIT_MULT       -> e.g. "1.05"
+  SCAN_INTERVAL_SECONDS  -> e.g. "60"
+
+  SOLANA_RPC             -> e.g. "https://api.mainnet-beta.solana.com"
+  JUPITER_ENDPOINT       -> e.g. "https://quote-api.jup.ag"
+
+  MEME_TOKENS            -> comma-separated list of mint addresses to trade
+                            e.g. "So11111111111111111111111111111111111111112"
+
+  WALLET_PRIVATE_KEY     -> base58 encoded private key (Phantom export format)
+  WITHDRAWAL_ADDRESS     -> base58 Solana address (for future withdraw logic)
+  PIN                    -> arbitrary string, not used in core logic yet
 """
 
 from __future__ import annotations
 
-# ---------- standard library imports ----------
+# ---------- standard library ----------
 import os
-import sqlite3
 import asyncio
 import base64
 import time
+import random
 from datetime import datetime, date
+from typing import Optional, Tuple, List
 
-# ---------- third-party imports ----------
+# ---------- third-party ----------
 import requests
-import numpy as np
-import pandas as pd
-import schedule
+import numpy as np  # used for simple risk / probability calcs
 from dotenv import load_dotenv
-from duckduckgo_search import DDGS  # currently unused but kept for future
 
 # ---------- optional Solana / solders stack ----------
 SOLANA_OK = False
 try:
     from solders.keypair import Keypair
     from solders.pubkey import Pubkey
-    from solders.rpc.api import RpcClient
+    from solders.rpc.api import Client as RpcClient
     from solders.transaction import VersionedTransaction
-    from solders.message import MessageV0
-    from solders.system_program import transfer, TransferParams
+    from solders import message
 
     SOLANA_OK = True
-except Exception as exc:
+except Exception as exc:  # noqa: BLE001
     print(f"[solana] Import error: {exc!r}")
     SOLANA_OK = False
+    Keypair = Pubkey = RpcClient = VersionedTransaction = message = None  # type: ignore
 
-# ---------- load .env ----------
+# ---------- load .env (local dev) ----------
 load_dotenv()
 
-# ---------- configuration from env ----------
-SIMULATION_MODE = os.getenv("SIMULATION_MODE", "True").lower() == "true"
-START_MODE = os.getenv("START_MODE", "start").lower()  # 'start' or 'withdraw'
-
-STARTING_USD = float(os.getenv("STARTING_USD", "100"))
-SOL_PRICE_USD = float(os.getenv("SOL_PRICE_USD", "250"))
-DAILY_LOSS_LIMIT_USD = float(os.getenv("DAILY_LOSS_LIMIT_USD", "25"))
-
-TRADE_THRESHOLD = float(os.getenv("TRADE_THRESHOLD", "0.72"))
-DB_FILE = os.getenv("DB_FILE", "memebot.db")
-
-JUPITER_ENDPOINT = os.getenv("JUPITER_ENDPOINT", "https://quote-api.jup.ag/v6")
-SOLANA_RPC = os.getenv("SOLANA_RPC", "https://api.mainnet-beta.solana.com")
-WALLET_PRIVATE_KEY = os.getenv("WALLET_PRIVATE_KEY", "")
-WITHDRAWAL_ADDRESS = os.getenv("WITHDRAWAL_ADDRESS", "")
-PIN = os.getenv("PIN", "1234")
-
-# ---------- simple in-memory state ----------
-STARTING_SOL = STARTING_USD / SOL_PRICE_USD
-current_capital_sol = STARTING_SOL
-today_pnl_sol = 0.0
-today_trade_count = 0
-today_date = date.today()
-
-# ============================================================
-#                    DATABASE HELPERS
-# ============================================================
-
-def init_db() -> None:
-    """Create tables if they don't exist."""
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-
-    c.execute(
-        """
-        CREATE TABLE IF NOT EXISTS trades (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ts TIMESTAMP,
-            symbol TEXT,
-            contract_address TEXT,
-            action TEXT,
-            size_sol REAL,
-            prob REAL,
-            risk_ratio REAL,
-            pnl_sol REAL,
-            mode TEXT
-        )
-        """
-    )
-
-    c.execute(
-        """
-        CREATE TABLE IF NOT EXISTS portfolio (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            date TEXT,
-            capital_sol REAL,
-            daily_pnl_sol REAL,
-            trades_today INTEGER
-        )
-        """
-    )
-
-    c.execute(
-        """
-        CREATE TABLE IF NOT EXISTS learn_events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp TIMESTAMP,
-            symbol TEXT,
-            contract_address TEXT,
-            prob REAL,
-            risk_ratio REAL,
-            trade_size_sol REAL,
-            pnl_sol REAL,
-            label INTEGER
-        )
-        """
-    )
-
-    conn.commit()
-    conn.close()
+# ---------- configuration helpers ----------
 
 
-def log_trade(
-    ts: datetime,
-    symbol: str,
-    ca: str,
-    action: str,
-    size_sol: float,
-    prob: float,
-    risk_ratio: float,
-    pnl_sol: float,
-    mode: str,
-) -> None:
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute(
-        """
-        INSERT INTO trades (
-            ts, symbol, contract_address, action, size_sol, prob,
-            risk_ratio, pnl_sol, mode
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (ts, symbol, ca, action, size_sol, prob, risk_ratio, pnl_sol, mode),
-    )
-    conn.commit()
-    conn.close()
+def env_bool(name: str, default: str = "True") -> bool:
+    return os.getenv(name, default).strip().lower() in ("1", "true", "yes", "y")
 
 
-def log_portfolio_for_day(
-    day: date, capital_sol: float, daily_pnl_sol: float, trades_today: int
-) -> None:
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute(
-        """
-        INSERT INTO portfolio (date, capital_sol, daily_pnl_sol, trades_today)
-        VALUES (?, ?, ?, ?)
-        """,
-        (day.isoformat(), capital_sol, daily_pnl_sol, trades_today),
-    )
-    conn.commit()
-    conn.close()
+def env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except Exception:  # noqa: BLE001
+        return default
 
 
-def insert_learn_event(
-    ts: datetime,
-    symbol: str,
-    ca: str,
-    prob: float,
-    risk_ratio: float,
-    trade_size_sol: float,
-    pnl_sol: float,
-) -> None:
-    """Store result of a trade for simple 'learning'."""
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    label = 1 if pnl_sol > 0 else 0
-    query = """
-    INSERT INTO learn_events (
-        timestamp, symbol, contract_address, prob, risk_ratio,
-        trade_size_sol, pnl_sol, label
-    )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    """
-    c.execute(
-        query,
-        (
-            ts,
-            symbol,
-            ca,
-            float(prob),
-            float(risk_ratio),
-            float(trade_size_sol),
-            float(pnl_sol),
-            int(label),
-        ),
-    )
-    conn.commit()
-    conn.close()
-
-# ============================================================
-#                    SIMPLE "LEARNING"
-# ============================================================
-
-def get_recent_stats() -> dict:
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute(
-        """
-        SELECT prob, pnl_sol FROM learn_events
-        WHERE timestamp >= datetime('now', '-3 days')
-        """
-    )
-    rows = c.fetchall()
-    conn.close()
-
-    if not rows:
-        return {"count": 0, "win_rate": 0.6, "avg_prob": 0.75}
-
-    probs = np.array([r[0] for r in rows], dtype=float)
-    pnls = np.array([r[1] for r in rows], dtype=float)
-    wins = (pnls > 0).astype(float)
-
-    win_rate = float(wins.mean())
-    avg_prob = float(probs.mean())
-    return {"count": len(rows), "win_rate": win_rate, "avg_prob": avg_prob}
+def env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except Exception:  # noqa: BLE001
+        return default
 
 
-def train_model_stub() -> None:
-    """Update threshold based on recent performance (very simple)."""
-    global TRADE_THRESHOLD
-    stats = get_recent_stats()
-    if stats["count"] == 0:
-        print("[learn] Not enough data yet.")
-        return
+SIMULATION_MODE: bool = env_bool("SIMULATION_MODE", "True")
+START_MODE: str = os.getenv("START_MODE", "start").strip().lower()
 
-    base = 0.7
-    adjust = (0.5 - stats["win_rate"]) * 0.1
-    new_threshold = min(0.9, max(0.6, base + adjust))
-    print(
-        f"[learn] count={stats['count']} win_rate={stats['win_rate']:.2f} "
-        f"old_threshold={TRADE_THRESHOLD:.3f} new_threshold={new_threshold:.3f}"
-    )
-    TRADE_THRESHOLD = new_threshold
+STARTING_SOL: float = env_float("STARTING_SOL", 0.4)
+STARTING_USD: float = env_float("STARTING_USD", 100.0)
+DAILY_LOSS_LIMIT_USD: float = env_float("DAILY_LOSS_LIMIT_USD", 25.0)
 
-# ============================================================
-#              SOLANA / JUPITER HELPERS
-# ============================================================
+MAX_TRADE_RISK_SOL: float = env_float("MAX_TRADE_RISK_SOL", STARTING_SOL)
+MIN_PROBABILITY: float = env_float("MIN_PROBABILITY", 0.72)
+STOP_LOSS_MULT: float = env_float("STOP_LOSS_MULT", 0.97)
+TAKE_PROFIT_MULT: float = env_float("TAKE_PROFIT_MULT", 1.05)
 
-def init_solana_wallet():
-    """Load wallet from WALLET_PRIVATE_KEY if libs and key are available."""
+SCAN_INTERVAL_SECONDS: int = env_int("SCAN_INTERVAL_SECONDS", 60)
+
+SOLANA_RPC: str = os.getenv("SOLANA_RPC", "https://api.mainnet-beta.solana.com")
+JUPITER_ENDPOINT: str = os.getenv("JUPITER_ENDPOINT", "https://quote-api.jup.ag")
+
+WALLET_PRIVATE_KEY: str = os.getenv("WALLET_PRIVATE_KEY", "").strip()
+WITHDRAWAL_ADDRESS: str = os.getenv("WITHDRAWAL_ADDRESS", "").strip()
+PIN: str = os.getenv("PIN", "").strip()
+
+MEME_TOKENS_ENV: str = os.getenv("MEME_TOKENS", "").strip()
+MEME_TOKENS: List[str] = [
+    mint.strip()
+    for mint in MEME_TOKENS_ENV.split(",")
+    if mint.strip()
+]
+
+# Jupiter uses wrapped SOL mint:
+WSOL_MINT = "So11111111111111111111111111111111111111112"
+
+# ---------- runtime state ----------
+
+portfolio_sol: float = STARTING_SOL
+starting_day: date = date.today()
+daily_realized_pnl_usd: float = 0.0
+
+
+# ---------- wallet helpers ----------
+
+
+def init_solana_wallet() -> Tuple[Optional["Keypair"], Optional["RpcClient"]]:
+    """Load wallet from WALLET_PRIVATE_KEY and set up RPC client."""
     if not SOLANA_OK:
-        print("[wallet] SOLANA_OK=False (solders import failed).")
+        print("[wallet] SOLANA_OK=False (solders imports missing).")
         return None, None
 
     if not WALLET_PRIVATE_KEY:
-        print("[wallet] WALLET_PRIVATE_KEY not set; staying in simulation mode.")
+        print("[wallet] WALLET_PRIVATE_KEY env not set.")
         return None, None
 
     try:
-        import base58 as _b58
+        import base58  # local import, installed via requirements
 
-        secret_key_bytes = _b58.b58decode(WALLET_PRIVATE_KEY)
-        wallet = Keypair.from_secret_key(secret_key_bytes)
+        secret_key_bytes = base58.b58decode(WALLET_PRIVATE_KEY)
+        wallet = Keypair.from_secret_key(secret_key_bytes)  # type: ignore[arg-type]
         client = RpcClient(SOLANA_RPC)
         print(f"[wallet] Loaded wallet: {wallet.pubkey()}")
         return wallet, client
-    except Exception as exc:
-        print(f"[wallet] Error loading wallet: {exc}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[wallet] Error loading wallet: {exc!r}")
         return None, None
 
 
-def jupiter_quote(input_mint: str, output_mint: str, amount: int) -> dict:
-    url = f"{JUPITER_ENDPOINT}/quote"
-    params = {"inputMint": input_mint, "outputMint": output_mint, "amount": amount}
-    r = requests.get(url, params=params, timeout=10)
-    r.raise_for_status()
-    return r.json()
+# ---------- Jupiter helpers ----------
 
 
-async def _execute_swap(quote: dict, wallet, client) -> str:
-    swap_url = f"{JUPITER_ENDPOINT}/swap"
-    payload = {
-        "quoteResponse": quote,
-        "userPublicKey": str(wallet.pubkey()),
-        "wrapAndUnwrapSol": True,
-        "prioritizationFeeLamports": "auto",
-    }
-    r = requests.post(swap_url, json=payload, timeout=20)
-    r.raise_for_status()
-
-    swap_tx_buf = base64.b64decode(r.json()["swapTransaction"])
-    tx = VersionedTransaction.from_bytes(swap_tx_buf)
-    tx.sign([wallet])
-    sig = client.send_transaction(tx)
-    print(f"[swap] sent tx: {sig}")
-    # many RPCs auto-confirm; you can add explicit confirm if your client supports it
-    return str(sig)
-
-
-def place_live_swap(
-    wallet, client, token_mint: str, amount_lamports: int, is_buy: bool
-) -> str | None:
-    """Execute a live swap using Jupiter."""
+def jupiter_quote(
+    input_mint: str,
+    output_mint: str,
+    amount_lamports: int,
+    slippage_bps: int = 50,
+) -> Optional[dict]:
+    """Get a quote from Jupiter v6."""
     try:
-        sol_mint = "So11111111111111111111111111111111111111112"
-        input_mint = sol_mint if is_buy else token_mint
-        output_mint = token_mint if is_buy else sol_mint
-        quote = jupiter_quote(input_mint, output_mint, amount_lamports)
-        sig = asyncio.run(_execute_swap(quote, wallet, client))
-        print(
-            f"[swap] {'BUY' if is_buy else 'SELL'} {amount_lamports / 1e9:.4f} SOL "
-            f"of token {token_mint}"
-        )
-        return sig
-    except Exception as exc:
-        print(f"[swap] error: {exc}")
+        params = {
+            "inputMint": input_mint,
+            "outputMint": output_mint,
+            "amount": str(amount_lamports),
+            "slippageBps": str(slippage_bps),
+        }
+        url = f"{JUPITER_ENDPOINT}/v6/quote"
+        resp = requests.get(url, params=params, timeout=20)
+        resp.raise_for_status()
+        quote = resp.json()
+        return quote
+    except Exception as exc:  # noqa: BLE001
+        print(f"[jupiter] Quote error: {exc!r}")
         return None
 
-# ---------- emergency withdrawal ----------
 
-def emergency_withdraw(wallet, client) -> None:
-    """Transfer almost all SOL to WITHDRAWAL_ADDRESS after PIN confirmation."""
-    if not wallet or not client:
-        print("[withdraw] No wallet/client; cannot withdraw.")
-        return
+def jupiter_swap(
+    wallet: "Keypair",
+    client: "RpcClient",
+    quote: dict,
+) -> Optional[str]:
+    """
+    Execute a Jupiter swap from a quote.
 
-    pin_in = input("Enter PIN to withdraw and stop bot: ").strip()
-    if pin_in != PIN:
-        print("[withdraw] Wrong PIN.")
-        return
-
-    if not WITHDRAWAL_ADDRESS:
-        print("[withdraw] WITHDRAWAL_ADDRESS not set.")
-        return
-
+    Returns signature string if successful, else None.
+    """
     try:
-        bal_resp = client.get_balance(wallet.pubkey())
-        lamports = bal_resp.value
-        print(f"[withdraw] balance = {lamports / 1e9:.4f} SOL")
+        url = f"{JUPITER_ENDPOINT}/v6/swap"
+        body = {
+            "quoteResponse": quote,
+            "userPublicKey": str(wallet.pubkey()),
+            "wrapAndUnwrapSol": True,
+        }
+        resp = requests.post(url, json=body, timeout=20)
+        resp.raise_for_status()
+        swap_tx_b64 = resp.json()["swapTransaction"]
 
-        send_lamports = int(max(0, lamports - int(0.003 * 1e9)))  # leave fees
+        raw_tx = VersionedTransaction.from_bytes(base64.b64decode(swap_tx_b64))  # type: ignore[arg-type]
+        # Sign with wallet
+        tx_bytes = message.to_bytes_versioned(raw_tx.message)  # type: ignore[attr-defined]
+        sig = wallet.sign_message(tx_bytes)
+        signed_tx = VersionedTransaction.populate(raw_tx.message, [sig])  # type: ignore[arg-type]
 
-        params = TransferParams(
-            from_pubkey=wallet.pubkey(),
-            to_pubkey=Pubkey.from_string(WITHDRAWAL_ADDRESS),
-            lamports=send_lamports,
-        )
-        ix = transfer(params)
+        tx_sig = client.send_raw_transaction(bytes(signed_tx))
+        print(f"[swap] Sent transaction: {tx_sig}")
+        return str(tx_sig)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[swap] Error sending swap: {exc!r}")
+        return None
 
-        # RpcClient in solders typically has a send_transaction helper; if not, adjust:
-        msg = MessageV0([ix], wallet.pubkey(), None)
-        tx = VersionedTransaction(msg, [wallet])
-        sig = client.send_transaction(tx)
+
+# ---------- strategy / risk helpers ----------
+
+
+def reset_daily_pnl_if_needed() -> None:
+    global starting_day, daily_realized_pnl_usd
+    today = date.today()
+    if today != starting_day:
+        print("[risk] New day detected, resetting daily PnL.")
+        starting_day = today
+        daily_realized_pnl_usd = 0.0
+
+
+def can_trade_today(sol_price_usd: float) -> bool:
+    reset_daily_pnl_if_needed()
+    if DAILY_LOSS_LIMIT_USD <= 0:
+        return True
+    if daily_realized_pnl_usd <= -DAILY_LOSS_LIMIT_USD:
         print(
-            f"[withdraw] sent {send_lamports / 1e9:.4f} SOL → {WITHDRAWAL_ADDRESS}, "
-            f"sig={sig}"
+            f"[risk] Daily loss limit hit: {daily_realized_pnl_usd:.2f} USD "
+            f"<= -{DAILY_LOSS_LIMIT_USD:.2f} USD",
         )
-    except Exception as exc:
-        print(f"[withdraw] error: {exc}")
-
-# ============================================================
-#              SIGNAL GENERATION (STUB)
-# ============================================================
-
-def fetch_signals() -> list[tuple[str, str, float, float]]:
-    """
-    Return a list of (symbol, contract_address, prob, risk_ratio).
-
-    For now we just return one fake signal so the logic works end-to-end.
-    You can later replace this with real GMGN / PumpFun / Twitter scanners.
-    """
-    symbol = "DEMO"
-    ca = "So11111111111111111111111111111111111111112"  # dummy mint
-    prob = 0.8
-    risk_ratio = 0.1
-    return [(symbol, ca, prob, risk_ratio)]
-
-# ============================================================
-#                   TRADING CORE
-# ============================================================
-
-def simulate_trade(
-    current_sol: float, prob: float, risk_ratio: float
-) -> tuple[float, float]:
-    """
-    Very simple simulation for the challenge:
-    - if prob is good, +86.2% on the trade size
-    - else, -20%
-    - single-trade loss is capped by DAILY_LOSS_LIMIT_USD
-    """
-    trade_size_sol = current_sol  # all-in = "extreme" challenge
-    if prob >= TRADE_THRESHOLD:
-        ret = 0.862
-    else:
-        ret = -0.2
-
-    pnl_sol = trade_size_sol * ret
-
-    # Cap loss
-    max_loss_sol = DAILY_LOSS_LIMIT_USD / SOL_PRICE_USD
-    if pnl_sol < -max_loss_sol:
-        pnl_sol = -max_loss_sol
-
-    new_capital = current_sol + pnl_sol
-    return new_capital, pnl_sol
+        return False
+    return True
 
 
-def analyze_and_trade(wallet, client) -> None:
-    """Main per-cycle logic: get signals, maybe trade, update DB and stats."""
-    global current_capital_sol, today_pnl_sol, today_trade_count, today_date
+def estimate_sol_price_usd() -> float:
+    """Rough SOL price from starting values, fallback to 200."""
+    if STARTING_SOL > 0 and STARTING_USD > 0:
+        return STARTING_USD / STARTING_SOL
+    return 200.0
 
-    # New day? log yesterday summary
-    if date.today() != today_date:
-        log_portfolio_for_day(
-            today_date, current_capital_sol, today_pnl_sol, today_trade_count
-        )
-        print(
-            f"[summary] {today_date.isoformat()} pnl={today_pnl_sol:.4f} "
-            f"SOL trades={today_trade_count}"
-        )
-        today_date = date.today()
-        today_pnl_sol = 0.0
-        today_trade_count = 0
 
-    print("[job] Fetching signals...")
-    signals = fetch_signals()
-    if not signals:
-        print("[job] No signals this cycle.")
+def choose_trade_size() -> float:
+    """How much SOL to risk on this trade."""
+    global portfolio_sol
+    amount = min(MAX_TRADE_RISK_SOL, portfolio_sol)
+    amount = max(0.0, amount)
+    return amount
+
+
+def pick_meme_token() -> Optional[str]:
+    """Pick a token mint from MEME_TOKENS env list."""
+    if not MEME_TOKENS:
+        print("[signal] No MEME_TOKENS configured; skipping live trade.")
+        return None
+    return random.choice(MEME_TOKENS)
+
+
+# ---------- simulation logic (no real trades) ----------
+
+
+def run_simulated_trade() -> None:
+    """Simple fake trade to exercise logic."""
+    global portfolio_sol, daily_realized_pnl_usd
+
+    sol_price = estimate_sol_price_usd()
+    if not can_trade_today(sol_price):
         return
 
-    for symbol, ca, prob, risk_ratio in signals:
+    prob = float(np.clip(np.random.normal(loc=0.8, scale=0.05), 0.0, 1.0))
+    print(f"[signal] DEMO prob={prob:.3f} threshold={MIN_PROBABILITY:.3f}")
+    if prob < MIN_PROBABILITY:
+        print("[SIM] No trade (probability below threshold).")
+        return
+
+    size_sol = choose_trade_size()
+    if size_sol <= 0:
+        print("[SIM] No trade; size <= 0.")
+        return
+
+    # Simulate PnL using simple random RR
+    rr = np.random.choice([TAKE_PROFIT_MULT, STOP_LOSS_MULT], p=[0.55, 0.45])
+    new_value = portfolio_sol * rr
+    pnl_sol = new_value - portfolio_sol
+    portfolio_sol = new_value
+
+    pnl_usd = pnl_sol * sol_price
+    daily_realized_pnl_usd += pnl_usd
+
+    print(
+        f"[SIM] traded {size_sol:.4f} SOL  ->  pnl={pnl_sol:.4f} SOL "
+        f"({pnl_usd:+.2f} USD), new_portfolio={portfolio_sol:.4f} SOL",
+    )
+
+
+# ---------- live trading logic ----------
+
+
+def run_live_trade(wallet: "Keypair", client: "RpcClient") -> None:
+    """
+    Live mode: pick a meme token and try one Jupiter swap SOL -> token.
+
+    NOTE: PnL tracking is approximate; we do not query on-chain balances here.
+    """
+    global portfolio_sol
+
+    sol_price = estimate_sol_price_usd()
+    if not can_trade_today(sol_price):
+        return
+
+    token_mint = pick_meme_token()
+    if not token_mint:
+        return
+
+    size_sol = choose_trade_size()
+    if size_sol <= 0:
+        print("[LIVE] No trade; size <= 0.")
+        return
+
+    lamports = int(size_sol * 1_000_000_000)
+    print(
+        f"[LIVE] Considering trade: {size_sol:.4f} SOL "
+        f"({lamports} lamports) -> token {token_mint[:6]}...",
+    )
+
+    quote = jupiter_quote(WSOL_MINT, token_mint, lamports, slippage_bps=50)
+    if not quote:
+        print("[LIVE] No quote returned; skipping.")
+        return
+
+    # Very basic sanity check on quote
+    out_amount = float(quote.get("outAmount", 0)) / (10 ** quote.get("outDecimals", 6))
+    if out_amount <= 0:
+        print("[LIVE] Quote outAmount <= 0; skipping.")
+        return
+
+    print(
+        f"[LIVE] Quote ok: in={size_sol:.4f} SOL -> "
+        f"out≈{out_amount:.6f} ({token_mint[:6]}...)",
+    )
+
+    sig = jupiter_swap(wallet, client, quote)
+    if sig:
+        portfolio_sol -= size_sol
         print(
-            f"[signal] {symbol} ca={ca[:8]}... prob={prob:.3f} "
-            f"risk_ratio={risk_ratio:.3f} threshold={TRADE_THRESHOLD:.3f}"
+            f"[LIVE] Swap submitted, approx new_portfolio={portfolio_sol:.4f} SOL "
+            f"(tx={sig})",
         )
-
-        if prob < TRADE_THRESHOLD:
-            print("[decision] Skip (probability below threshold).")
-            continue
-
-        trade_size_sol = current_capital_sol
-        if trade_size_sol <= 0:
-            print("[decision] No capital left; skipping.")
-            continue
-
-        ts = datetime.utcnow()
-
-        if SIMULATION_MODE or not wallet or not client:
-            new_capital, pnl_sol = simulate_trade(current_capital_sol, prob, risk_ratio)
-            print(
-                f"[SIM] traded {trade_size_sol:.4f} SOL, pnl={pnl_sol:.4f} "
-                f"SOL → new_capital={new_capital:.4f} SOL"
-            )
-            mode = "SIM"
-            current_capital_sol = new_capital
-        else:
-            lamports = int(trade_size_sol * 1e9)
-            sig = place_live_swap(wallet, client, ca, lamports, is_buy=True)
-            mode = "LIVE"
-            pnl_sol = 0.0  # real PnL not tracked here
-            print(f"[LIVE] swap tx={sig}, size={trade_size_sol:.4f} SOL")
-
-        today_pnl_sol += pnl_sol
-        today_trade_count += 1
-
-        log_trade(
-            ts,
-            symbol,
-            ca,
-            "BUY",
-            trade_size_sol,
-            prob,
-            risk_ratio,
-            pnl_sol,
-            mode,
-        )
-        insert_learn_event(ts, symbol, ca, prob, risk_ratio, trade_size_sol, pnl_sol)
-
-        # only 1 trade per cycle
-        break
-
-# ============================================================
-#          DAILY SUMMARY & LEARNING JOBS
-# ============================================================
-
-def daily_summary_job() -> None:
-    """Print a simple daily summary."""
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute(
-        """
-        SELECT COALESCE(SUM(pnl_sol), 0), COUNT(*) FROM trades
-        WHERE date(ts) = date('now', 'utc')
-        """
-    )
-    row = c.fetchone()
-    conn.close()
-    total_pnl, count = row if row else (0.0, 0)
-
-    print(
-        f"[summary] Today so far: trades={count} total_pnl={total_pnl:.4f} SOL "
-        f"(~${total_pnl * SOL_PRICE_USD:.2f})"
-    )
-
-
-def daily_learning_job() -> None:
-    print("[learn] Running daily learning job...")
-    train_model_stub()
-
-# ============================================================
-#                       MAIN LOOP
-# ============================================================
-
-def main() -> None:
-    print(
-        f"[start] Memebot | SIM={SIMULATION_MODE} | START={STARTING_SOL:.4f} SOL"
-    )
-    init_db()
-
-    wallet = None
-    client = None
-
-    if SIMULATION_MODE:
-        print("[start] Simulation mode ON.")
     else:
+        print("[LIVE] Swap failed; portfolio unchanged.")
+
+
+# ---------- main loop ----------
+
+
+async def main_loop() -> None:
+    print(">>> memebot.py started (top of file reached)")
+    print(
+        f"[start] Memebot | SIM={SIMULATION_MODE} | START={STARTING_SOL:.4f} SOL "
+        f"| MODE={START_MODE}",
+    )
+
+    wallet: Optional["Keypair"] = None
+    client: Optional["RpcClient"] = None
+
+    if not SIMULATION_MODE:
         if not SOLANA_OK:
-            print("[fatal] SOLANA_OK=False but SIMULATION_MODE=False; cannot go live.")
+            print(
+                "[fatal] SIMULATION_MODE=False but SOLANA_OK=False; "
+                "cannot go live until solders is installed correctly.",
+            )
             return
 
         wallet, client = init_solana_wallet()
         if not wallet or not client:
             print(
                 "[fatal] SIMULATION_MODE=False but wallet/client not available; "
-                "cannot go live."
+                "cannot go live.",
             )
             return
 
-    if START_MODE == "withdraw":
-        if wallet and client:
-            emergency_withdraw(wallet, client)
-        else:
-            print("[withdraw] Cannot withdraw (no wallet/client).")
+    # START_MODE: for now we only support normal "start"
+    if START_MODE != "start":
+        print(
+            f"[start] START_MODE={START_MODE!r} – withdraw logic "
+            "not implemented yet; exiting safely.",
+        )
         return
-
-    # schedule jobs
-    schedule.every(1).hours.do(lambda: analyze_and_trade(wallet, client))
-    schedule.every().day.at("23:59").do(daily_summary_job)
-    schedule.every().day.at("02:00").do(daily_learning_job)
-
-    # run one cycle immediately
-    analyze_and_trade(wallet, client)
 
     # main loop
     while True:
-        schedule.run_pending()
-        time.sleep(30)
+        try:
+            print("[job] Fetching signals…")
+            if SIMULATION_MODE:
+                run_simulated_trade()
+            else:
+                assert wallet is not None and client is not None
+                run_live_trade(wallet, client)
+
+        except Exception as exc:  # noqa: BLE001
+            print(f"[error] Unhandled exception in main loop: {exc!r}")
+
+        # Wait until next scan
+        time.sleep(SCAN_INTERVAL_SECONDS)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        asyncio.run(main_loop())
+    except KeyboardInterrupt:
+        print("\n[exit] KeyboardInterrupt – shutting down memebot.")
