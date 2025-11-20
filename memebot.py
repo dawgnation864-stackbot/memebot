@@ -25,7 +25,9 @@ MIN_PROBABILITY        -> e.g. 0.70
 SCAN_INTERVAL_SECONDS  -> e.g. 60
 
 # Jupiter
-JUPITER_ENDPOINT       -> https://quote-api.jup.ag
+JUPITER_ENDPOINT       -> https://quote-api.jup.ag/ultra
+JUPITER_API_KEY = os.getenv("JUPITER_API_KEY", "").strip()
+JUPITER_API_BASE = os.getenv("JUPITER_API_BASE", "https://api.jup.ag")
 
 # safety / misc
 PIN                    -> any 4–6 digit number you set (for future controls)
