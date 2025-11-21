@@ -24,10 +24,20 @@ STOP_LOSS_MULT         -> e.g. 0.5   (-50%)
 MIN_PROBABILITY        -> e.g. 0.70
 SCAN_INTERVAL_SECONDS  -> e.g. 60
 
-# Jupiter
-JUPITER_ENDPOINT       -> your Ultra endpoint, e.g. https://api.jup.ag/ultra
-JUPITER_API_BASE       -> (optional) if empty, defaults to JUPITER_ENDPOINT
-JUPITER_API_KEY        -> your Jupiter API key (string)
+# ---------- Jupiter config ----------
+JUPITER_API_KEY = os.getenv("JUPITER_API_KEY", "").strip()
+
+# public quote host (no auth required)
+JUPITER_QUOTE_BASE = os.getenv(
+    "JUPITER_QUOTE_BASE",
+    "https://quote-api.jup.ag"
+).rstrip("/")
+
+# base used for swaps as well
+JUPITER_ENDPOINT = os.getenv(
+    "JUPITER_ENDPOINT",
+    "https://quote-api.jup.ag"
+).rstrip("/")
 
 # safety / misc
 PIN                    -> any 4–6 digit number you set (for future controls)
