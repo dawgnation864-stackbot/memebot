@@ -202,13 +202,11 @@ def jupiter_request(path: str, params: Dict[str, Any]) -> Optional[Dict[str, Any
 
 def jupiter_quote(input_mint: str, output_mint: str, amount_lamports: int) -> Dict[str, Any] | None:
     """
-    Call Jupiter v6 quote endpoint, using the Ultra base URL + API key.
-
-    Returns a single best route dict, or None if no route / error.
+    Call Jupiter public v6 quote endpoint.
+    Uses https://quote-api.jup.ag/v6/quote and does NOT require auth.
+    Returns a single best route dict or None.
     """
-    # Base URL – for Ultra plan this should be "https://api.jup.ag/ultra"
-    base = os.getenv("JUPITER_API_BASE", "https://api.jup.ag/ultra").rstrip("/")
-    url = f"{base}/v6/quote"
+    url = f"{JUPITER_QUOTE_BASE}/v6/quote"
 
     params = {
         "inputMint": input_mint,
@@ -218,10 +216,8 @@ def jupiter_quote(input_mint: str, output_mint: str, amount_lamports: int) -> Di
         "onlyDirectRoutes": "false",
     }
 
-    # Jupiter Ultra expects the key in x-api-key header (NOT Bearer)
-    headers = {
-        "accept": "application/json",
-    }
+    headers = {"accept": "application/json"}
+    # Optional: send key if you want, but public endpoint doesn't need it
     if JUPITER_API_KEY:
         headers["x-api-key"] = JUPITER_API_KEY
 
@@ -230,8 +226,7 @@ def jupiter_quote(input_mint: str, output_mint: str, amount_lamports: int) -> Di
         resp.raise_for_status()
         data = resp.json()
 
-        # Jupiter might return either a list of routes or { "data": [...] }
-        routes = None
+        # Jupiter sometimes returns {"data": [...]} or a bare list
         if isinstance(data, dict) and "data" in data:
             routes = data.get("data") or []
         elif isinstance(data, list):
@@ -244,7 +239,6 @@ def jupiter_quote(input_mint: str, output_mint: str, amount_lamports: int) -> Di
             print("[swap] No routes returned from Jupiter.")
             return None
 
-        # Use the first / best route
         return routes[0]
 
     except Exception as exc:
