@@ -219,13 +219,14 @@ def jupiter_quote(input_mint: str, output_mint: str, amount_lamports: int) -> Di
     return routes[0]
 
 
-def jupiter_swap(wallet: Keypair, client: RpcClient, route: Dict[str, Any]) -> str | None:
+def jupiter_swap(wallet: "Keypair", client: "RpcClient", route: Dict[str, Any]) -> str | None:
     """
-    Submit a Jupiter swap using /v6/swap.
+    Submit a Jupiter swap using /v6/swap on the Ultra endpoint.
     """
     try:
         base = JUPITER_API_BASE.rstrip("/")
         url = f"{base}/v6/swap"
+
         user_pubkey = str(wallet.pubkey())
         payload = {
             "quoteResponse": route,
@@ -234,7 +235,7 @@ def jupiter_swap(wallet: Keypair, client: RpcClient, route: Dict[str, Any]) -> s
         }
 
         headers = {
-            "Content-Type": "application/json",
+            "accept": "application/json",
         }
         if JUPITER_API_KEY:
             headers["x-api-key"] = JUPITER_API_KEY
@@ -242,6 +243,7 @@ def jupiter_swap(wallet: Keypair, client: RpcClient, route: Dict[str, Any]) -> s
         resp = requests.post(url, json=payload, headers=headers, timeout=30)
         resp.raise_for_status()
         data = resp.json()
+
         if "swapTransaction" not in data:
             print("[swap] swapTransaction missing from response.")
             return None
@@ -250,7 +252,7 @@ def jupiter_swap(wallet: Keypair, client: RpcClient, route: Dict[str, Any]) -> s
         raw_tx = base64.b64decode(swap_tx)
 
         send_resp = client.send_raw_transaction(raw_tx)
-        sig = send_resp["result"]
+        sig = send_resp.get("result") or send_resp
         print(f"[swap] submitted tx: {sig}")
         return sig
     except Exception as exc:
