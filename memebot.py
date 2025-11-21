@@ -99,10 +99,20 @@ STOP_LOSS_MULT = env_float("STOP_LOSS_MULT", 0.5)
 MIN_PROBABILITY = env_float("MIN_PROBABILITY", 0.7)
 SCAN_INTERVAL_SECONDS = int(env_float("SCAN_INTERVAL_SECONDS", 60))
 
-# Jupiter config
-JUPITER_ENDPOINT = os.getenv("JUPITER_ENDPOINT", "https://api.jup.ag").rstrip("/")
-JUPITER_API_BASE = os.getenv("JUPITER_API_BASE", JUPITER_ENDPOINT).rstrip("/")
+# ---------- Jupiter config ----------
 JUPITER_API_KEY = os.getenv("JUPITER_API_KEY", "").strip()
+
+# public quote host (no auth required)
+JUPITER_QUOTE_BASE = os.getenv(
+    "JUPITER_QUOTE_BASE",
+    "https://quote-api.jup.ag"
+).rstrip("/")
+
+# base used for swaps as well
+JUPITER_ENDPOINT = os.getenv(
+    "JUPITER_ENDPOINT",
+    "https://quote-api.jup.ag"
+).rstrip("/")
 
 # misc
 PIN_CODE = os.getenv("PIN", "0000").strip()
