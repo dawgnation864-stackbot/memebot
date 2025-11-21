@@ -29,7 +29,7 @@ MIN_PROBABILITY        -> e.g. 0.70
 SCAN_INTERVAL_SECONDS  -> e.g. 60   (how often to try a trade)
 
 # Jupiter public
-JUPITER_BASE           -> https://quote-api.jup.ag   (no key needed)
+JUPITER_BASE = os.getenv("JUPITER_BASE", "https://api.jup.ag").rstrip("/")
 """
 
 from __future__ import annotations
