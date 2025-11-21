@@ -200,22 +200,56 @@ def jupiter_request(path: str, params: Dict[str, Any]) -> Optional[Dict[str, Any
         return None
 
 
-def jupiter_quote(input_mint: str, output_mint: str, amount_lamports: int) -> Optional[Dict[str, Any]]:
+def jupiter_quote(input_mint: str, output_mint: str, amount_lamports: int) -> Dict[str, Any] | None:
     """
-    Call Jupiter /v6/quote and return the full quote JSON
-    (which we then pass directly into /v6/swap).
+    Call Jupiter v6 quote endpoint, using the Ultra base URL + API key.
+
+    Returns a single best route dict, or None if no route / error.
     """
+    # Base URL – for Ultra plan this should be "https://api.jup.ag/ultra"
+    base = os.getenv("JUPITER_API_BASE", "https://api.jup.ag/ultra").rstrip("/")
+    url = f"{base}/v6/quote"
+
     params = {
         "inputMint": input_mint,
         "outputMint": output_mint,
-        "amount": amount_lamports,
+        "amount": str(amount_lamports),
         "slippageBps": 500,
         "onlyDirectRoutes": "false",
     }
-    data = jupiter_request("/v6/quote", params)
-    if not data:
+
+    # Jupiter Ultra expects the key in x-api-key header (NOT Bearer)
+    headers = {
+        "accept": "application/json",
+    }
+    if JUPITER_API_KEY:
+        headers["x-api-key"] = JUPITER_API_KEY
+
+    try:
+        resp = requests.get(url, params=params, headers=headers, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+
+        # Jupiter might return either a list of routes or { "data": [...] }
+        routes = None
+        if isinstance(data, dict) and "data" in data:
+            routes = data.get("data") or []
+        elif isinstance(data, list):
+            routes = data
+        else:
+            print(f"[swap] Unexpected quote response format: {data}")
+            return None
+
+        if not routes:
+            print("[swap] No routes returned from Jupiter.")
+            return None
+
+        # Use the first / best route
+        return routes[0]
+
+    except Exception as exc:
+        print(f"[swap] quote error: {exc!r}")
         return None
-    return data
 
 
 def jupiter_swap(wallet: Keypair, client: RpcClient, route: Dict[str, Any]) -> Optional[str]:
