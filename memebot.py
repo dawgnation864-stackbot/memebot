@@ -171,20 +171,18 @@ def init_solana_wallet():
 
 def jupiter_request(path: str, params: dict):
     """
-    Generic helper for Jupiter Ultra API requests.
-    Uses JUPITER_API_BASE and sends the Ultra API key in x-api-key header.
+    Generic helper for Jupiter API requests.
+    Automatically injects API key + correct endpoint.
     """
     base = JUPITER_API_BASE.rstrip("/")
     url = f"{base}{path}"
 
-    # Base headers
+    # Jupiter Ultra expects x-api-key, not Bearer auth
     headers = {
-        "accept": "application/json",
+        "Content-Type": "application/json",
     }
-
-    # Ultra API key header
     if JUPITER_API_KEY:
-        headers["x-api-key"] = JUPITER_API_KEY  # <- this is the important part
+        headers["x-api-key"] = JUPITER_API_KEY
 
     try:
         resp = requests.get(url, params=params, headers=headers, timeout=10)
@@ -219,14 +217,13 @@ def jupiter_quote(input_mint: str, output_mint: str, amount_lamports: int) -> Di
     return routes[0]
 
 
-def jupiter_swap(wallet: "Keypair", client: "RpcClient", route: Dict[str, Any]) -> str | None:
+def jupiter_swap(wallet: Keypair, client: RpcClient, route: Dict[str, Any]) -> str | None:
     """
-    Submit a Jupiter swap using /v6/swap on the Ultra endpoint.
+    Submit a Jupiter swap using /v6/swap.
+    If anything fails, we just log the error and return None (no funds moved).
     """
     try:
-        base = JUPITER_API_BASE.rstrip("/")
-        url = f"{base}/v6/swap"
-
+        url = f"{JUPITER_ENDPOINT}/v6/swap"
         user_pubkey = str(wallet.pubkey())
         payload = {
             "quoteResponse": route,
@@ -235,7 +232,7 @@ def jupiter_swap(wallet: "Keypair", client: "RpcClient", route: Dict[str, Any]) 
         }
 
         headers = {
-            "accept": "application/json",
+            "Content-Type": "application/json",
         }
         if JUPITER_API_KEY:
             headers["x-api-key"] = JUPITER_API_KEY
@@ -243,16 +240,14 @@ def jupiter_swap(wallet: "Keypair", client: "RpcClient", route: Dict[str, Any]) 
         resp = requests.post(url, json=payload, headers=headers, timeout=30)
         resp.raise_for_status()
         data = resp.json()
-
         if "swapTransaction" not in data:
             print("[swap] swapTransaction missing from response.")
             return None
 
         swap_tx = data["swapTransaction"]
         raw_tx = base64.b64decode(swap_tx)
-
         send_resp = client.send_raw_transaction(raw_tx)
-        sig = send_resp.get("result") or send_resp
+        sig = send_resp["result"]
         print(f"[swap] submitted tx: {sig}")
         return sig
     except Exception as exc:
