@@ -172,18 +172,19 @@ def init_solana_wallet():
 def jupiter_request(path: str, params: dict):
     """
     Generic helper for Jupiter Ultra API requests.
-    Uses JUPITER_API_BASE and JUPITER_API_KEY.
+    Uses JUPITER_API_BASE and sends the Ultra API key in x-api-key header.
     """
     base = JUPITER_API_BASE.rstrip("/")
     url = f"{base}{path}"
 
+    # Base headers
     headers = {
-        "Content-Type": "application/json",
+        "accept": "application/json",
     }
 
+    # Ultra API key header
     if JUPITER_API_KEY:
-        # Ultra uses x-api-key header
-        headers["x-api-key"] = JUPITER_API_KEY
+        headers["x-api-key"] = JUPITER_API_KEY  # <- this is the important part
 
     try:
         resp = requests.get(url, params=params, headers=headers, timeout=10)
