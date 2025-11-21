@@ -88,8 +88,7 @@ MIN_PROBABILITY = env_float("MIN_PROBABILITY", 0.7)
 SCAN_INTERVAL_SECONDS = int(env_float("SCAN_INTERVAL_SECONDS", 60))
 
 # Jupiter public base (no key needed)
-JUPITER_BASE = os.getenv("JUPITER_BASE", "https://quote-api.jup.ag").rstrip("/")
-
+JUPITER_BASE = os.getenv("JUPITER_BASE", "https://api.jup.ag").rstrip("/")
 # ---------- meme token list ----------
 DEFAULT_MEME_TOKENS: Dict[str, str] = {
     "BONK":   "DezXAFuB81om4uPCecv9hVb2tSCD5qLQJd4d8zF9CqY",
