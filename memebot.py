@@ -24,10 +24,9 @@ STOP_LOSS_MULT         -> e.g. 0.5  (-50%)
 MIN_PROBABILITY        -> e.g. 0.70
 SCAN_INTERVAL_SECONDS  -> e.g. 60
 
-# Jupiter HTTP endpoints (NO quote-api.jup.ag anywhere)
+# Jupiter HTTP endpoints – PUBLIC, NO AUTH
 JUPITER_QUOTE_URL      -> https://api.jup.ag/quote
 JUPITER_SWAP_URL       -> https://api.jup.ag/swap
-JUPITER_API_KEY        -> (optional) Ultra key; sent in Authorization header if set
 
 # safety / misc
 PIN                    -> any 4–6 digit number you set (for future controls)
@@ -100,10 +99,9 @@ STOP_LOSS_MULT = env_float("STOP_LOSS_MULT", 0.5)
 MIN_PROBABILITY = env_float("MIN_PROBABILITY", 0.7)
 SCAN_INTERVAL_SECONDS = int(env_float("SCAN_INTERVAL_SECONDS", 60))
 
-# >>> THE ONLY JUPITER URLS WE USE <<<
+# >>> PUBLIC JUPITER URLS <<<
 JUPITER_QUOTE_URL = os.getenv("JUPITER_QUOTE_URL", "https://api.jup.ag/quote").rstrip("/")
 JUPITER_SWAP_URL = os.getenv("JUPITER_SWAP_URL", "https://api.jup.ag/swap").rstrip("/")
-JUPITER_API_KEY = os.getenv("JUPITER_API_KEY", "").strip()
 
 PIN_CODE = os.getenv("PIN", "0000").strip()
 NEGATIVE_KEYWORDS = [
@@ -179,12 +177,13 @@ def init_solana_wallet():
 # ---------- Jupiter HTTP helpers ----------
 
 def jupiter_headers() -> Dict[str, str]:
-    headers = {
+    """
+    Headers for PUBLIC Jupiter endpoints.
+    NO Authorization header – avoids 401 Unauthorized.
+    """
+    return {
         "Accept": "application/json",
     }
-    if JUPITER_API_KEY:
-        headers["Authorization"] = f"Bearer {JUPITER_API_KEY}"
-    return headers
 
 
 def jupiter_quote(input_mint: str, output_mint: str, amount_lamports: int, slippage_bps: int = 500):
@@ -218,7 +217,11 @@ def jupiter_quote(input_mint: str, output_mint: str, amount_lamports: int, slipp
             return routes[0]
         return data
     except requests.exceptions.HTTPError as exc:
-        print(f"[swap] quote error: HTTPError({exc}) for url: {resp.url}")
+        try:
+            url = resp.url  # type: ignore[name-defined]
+        except Exception:
+            url = JUPITER_QUOTE_URL
+        print(f"[swap] quote error: HTTPError({exc}) for url: {url}")
         return None
     except Exception as exc:
         print(f"[swap] quote network/error: {exc!r}")
