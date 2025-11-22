@@ -1,58 +1,69 @@
 """
-MemeBot – aggressive Solana memecoin bot for Railway + Jupiter (PUBLIC API, no Ultra)
+MemeBot – aggressive Solana memecoin bot for Railway + Jupiter Ultra
 
-This version:
-- Uses the public Jupiter aggregator (https://quote-api.jup.ag)
-- Does NOT require any Jupiter API key
-- Trades random meme tokens from a list, in SOL
-- Respects SIMULATION_MODE (True/False) via env vars
+REQUIRED ENV VARIABLES (Railway → Variables)
 
-REQUIRED ENV VARIABLES (Railway → Variables):
+# ---- core run mode ----
+SIMULATION_MODE        -> "True" or "False"   (string; default "True")
+START_MODE             -> "start"            (or "withdraw" – not implemented yet)
 
-# core run modes
-SIMULATION_MODE        -> "True" or "False"   (string)
-START_MODE             -> "start"            (or "withdraw" in future)
-
-# wallet / RPC
+# ---- wallet / RPC ----
 WALLET_PRIVATE_KEY     -> base58-encoded secret key (NOT your seed phrase)
 SOLANA_RPC             -> https://api.mainnet-beta.solana.com
-WITHDRAWAL_ADDRESS     -> your Solana address for emergency withdraws (not used yet in this version)
+WITHDRAWAL_ADDRESS     -> your Solana address (for future emergency withdraws)
 
-# risk / sizing
+# ---- risk / sizing ----
 STARTING_SOL           -> e.g. 0.4000
 DAILY_LOSS_LIMIT_USD   -> e.g. 25
-SOL_PRICE_USD          -> e.g. 180  (rough PnL calc)
+SOL_PRICE_USD          -> e.g. 180  (rough PnL conversions only)
 MAX_TRADE_RISK_SOL     -> e.g. 0.40
+TAKE_PROFIT_MULT       -> e.g. 2.0   (not fully used yet)
+STOP_LOSS_MULT         -> e.g. 0.5   (not fully used yet)
 
-# signal filters
+# ---- signal filters ----
 MIN_PROBABILITY        -> e.g. 0.70
-SCAN_INTERVAL_SECONDS  -> e.g. 60   (how often to try a trade)
+SCAN_INTERVAL_SECONDS  -> e.g. 60
 
-# Jupiter public
-JUPITER_BASE = os.getenv("JUPITER_BASE", "https://api.jup.ag").rstrip("/")
+# ---- Jupiter Ultra auth + base ----
+# Example:
+#   JUPITER_API_BASE = https://api.jup.ag/ultra
+#   JUPITER_API_KEY  = <your key from the dashboard>
+JUPITER_API_BASE       -> e.g. https://api.jup.ag/ultra
+JUPITER_API_KEY        -> your Jupiter Ultra API key
+
+# ---- safety / misc ----
+PIN                    -> any 4–6 digit number (future manual controls)
+NEGATIVE_KEYWORDS      -> comma list, e.g. "honeypot,scam,rugpull"
+MEME_TOKENS            -> optional comma list "NAME:mint,NAME2:mint2,..."
+                          if empty, defaults below are used.
 """
 
 from __future__ import annotations
 
-# ---------- standard library ----------
+# ---------- standard library imports ----------
 import os
-import time
+import asyncio
 import base64
+import time
 from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
 
-# ---------- third-party ----------
+# ---------- third-party imports ----------
 import requests
 import numpy as np
 from dotenv import load_dotenv
 import schedule
 
-# ---------- Solana libs (must be in requirements and installed) ----------
+# ---------- optional Solana / Jupiter support ----------
 SOLANA_OK = False
 try:
+    # solana client
     from solana.rpc.api import Client as RpcClient
+
+    # solders keypair + pubkey types
     from solders.keypair import Keypair
     from solders.pubkey import Pubkey
+
     SOLANA_OK = True
 except Exception as exc:
     print(f"[solana] Import error: {exc!r}")
@@ -61,17 +72,22 @@ except Exception as exc:
 # ---------- load env ----------
 load_dotenv()
 
-# ---------- env helpers ----------
+# ---------- helpers for env ----------
+
 def env_bool(name: str, default: bool) -> bool:
     return os.getenv(name, str(default)).strip().lower() in {"1", "true", "yes", "y"}
 
 def env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
     try:
-        return float(os.getenv(name, str(default)))
+        return float(raw)
     except Exception:
         return default
 
-# ---------- config ----------
+# ---------- configuration from env ----------
+
 SIMULATION_MODE = env_bool("SIMULATION_MODE", True)
 START_MODE = os.getenv("START_MODE", "start").strip().lower()
 
@@ -83,16 +99,28 @@ STARTING_SOL = env_float("STARTING_SOL", 0.4)
 SOL_PRICE_USD = env_float("SOL_PRICE_USD", 180.0)
 DAILY_LOSS_LIMIT_USD = env_float("DAILY_LOSS_LIMIT_USD", 25.0)
 MAX_TRADE_RISK_SOL = env_float("MAX_TRADE_RISK_SOL", 0.40)
+TAKE_PROFIT_MULT = env_float("TAKE_PROFIT_MULT", 2.0)
+STOP_LOSS_MULT = env_float("STOP_LOSS_MULT", 0.5)
 
 MIN_PROBABILITY = env_float("MIN_PROBABILITY", 0.7)
 SCAN_INTERVAL_SECONDS = int(env_float("SCAN_INTERVAL_SECONDS", 60))
 
-# Jupiter public base (no key needed)
-JUPITER_BASE = os.getenv("JUPITER_BASE", "https://api.jup.ag").rstrip("/")
-# ---------- meme token list ----------
+# Jupiter Ultra
+JUPITER_API_BASE = os.getenv("JUPITER_API_BASE", "https://api.jup.ag/ultra").rstrip("/")
+JUPITER_API_KEY = os.getenv("JUPITER_API_KEY", "").strip()
+
+PIN_CODE = os.getenv("PIN", "0000").strip()
+NEGATIVE_KEYWORDS = [
+    k.strip().lower()
+    for k in os.getenv("NEGATIVE_KEYWORDS", "").split(",")
+    if k.strip()
+]
+
+# ---------- default aggressive meme universe ----------
 DEFAULT_MEME_TOKENS: Dict[str, str] = {
+    # These are EXAMPLE mints – you should update to the current hot ones you like.
     "BONK":   "DezXAFuB81om4uPCecv9hVb2tSCD5qLQJd4d8zF9CqY",
-    "WIF":    "8bF4uoN9kUQJeVX5TR1FURCa8yE1xHd2h9kPGfiVNN7E",
+    "WIF":    "8bF4uoN9kUQJeVX5TR1fURCa8yE1xHd2h9kPGfiVNN7E",
     "POPCAT": "7aKxL5D2UzmkFbnxgSJ8tkWPcShM3SPWwHgvxCrkvV2n",
     "MEW":    "9n4nbM75f5Ui33ZbPYXn59EwSgE8CGsHtAeTH5YFeJ9E",
     "MYRO":   "2RSuB8m67xY7qsKC3gQeHTFfaR9EMgrFHafpXp1em2aH",
@@ -101,26 +129,47 @@ DEFAULT_MEME_TOKENS: Dict[str, str] = {
     "SLERF":  "A5FK5GRnmt1vGjNFH6G6Dq3uTJS3BM4tiTnC5NzJctqv",
     "PENG":   "9PENGQk3R3ZkN93Bp96rKMgVx7QiZfq8np5xpoE2mR7S",
     "SAMO":   "7xKXtg2s9mLMpTq2s93iDby5SLmtAoeJbY7aHedj5Lwa",
+    "CHONK":  "4CHoNkWzHe9aVq4p6ZtUZmW8Py46nCTaPPnnw6G7xJtP",
+    "TURBO":  "2TuRBoS4Gf1HeLenp8QxR3cWsvtT2mG5DeADP4bVpFXZ",
+    "FLOKI":  "3k5Flokie3RX2iYp7Gx5oBJNrCaLCSv6iQFZjHzKzJk6",
+    "MOODENG": "8Mo0DenGkGSzaRN3qHYpVXyPDbL3U5eScVn2RZLXg726",
 }
 
-MEME_TOKENS = DEFAULT_MEME_TOKENS
+MEME_TOKENS_ENV = os.getenv("MEME_TOKENS", "").strip()
+if MEME_TOKENS_ENV:
+    MEME_TOKENS: Dict[str, str] = {}
+    for raw in MEME_TOKENS_ENV.split(","):
+        part = raw.strip()
+        if not part:
+            continue
+        if ":" in part:
+            name, mint = [p.strip() for p in part.split(":", 1)]
+            MEME_TOKENS[name or mint] = mint
+        else:
+            MEME_TOKENS[part] = part
+else:
+    MEME_TOKENS = DEFAULT_MEME_TOKENS
 
-# ---------- state ----------
+# ---------- runtime state ----------
 balance_sol: float = STARTING_SOL
 start_day = datetime.utcnow().date()
 realized_pnl_usd: float = 0.0
 
-# ---------- Solana + wallet ----------
-def init_solana_wallet() -> tuple[Optional[Keypair], Optional[RpcClient]]:
+# ---------- Solana helpers ----------
+
+def init_solana_wallet():
+    """Load wallet from WALLET_PRIVATE_KEY if libs and key are available."""
     if not SOLANA_OK:
-        print("[wallet] Solana libs not available.")
+        print("[wallet] SOLANA_OK=False, cannot init wallet.")
         return None, None
+
     if not WALLET_PRIVATE_KEY:
-        print("[wallet] WALLET_PRIVATE_KEY not set.")
+        print("[wallet] WALLET_PRIVATE_KEY not set; cannot go live.")
         return None, None
 
     try:
         from base58 import b58decode
+
         secret_key_bytes = b58decode(WALLET_PRIVATE_KEY)
         wallet = Keypair.from_bytes(secret_key_bytes)
         client = RpcClient(SOLANA_RPC)
@@ -130,67 +179,105 @@ def init_solana_wallet() -> tuple[Optional[Keypair], Optional[RpcClient]]:
         print(f"[wallet] Error loading wallet: {exc!r}")
         return None, None
 
-# ---------- Jupiter public helpers ----------
-def jupiter_quote(input_mint: str, output_mint: str, amount: int):
-    url = f"{JUPITER_BASE}/v6/quote"
+# ---------- Jupiter helpers ----------
+
+def jupiter_request(path: str, params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Generic helper for Jupiter Ultra API requests.
+    Uses JUPITER_API_BASE and sends x-api-key header.
+    """
+    base = JUPITER_API_BASE.rstrip("/")
+    url = f"{base}{path}"
+
     headers = {
-        "Authorization": f"Bearer {JUPITER_API_KEY}",
-        "x-api-key": JUPITER_API_KEY,
         "Accept": "application/json",
     }
-    params = {
-        "inputMint": input_mint,
-        "outputMint": output_mint,
-        "amount": amount,
-        "slippageBps": 500,
-        "onlyDirectRoutes": "false",
-    }
+    if JUPITER_API_KEY:
+        headers["x-api-key"] = JUPITER_API_KEY
 
     try:
-        r = requests.get(url, params=params, headers=headers, timeout=10)
-        r.raise_for_status()
-        return r.json()
+        resp = requests.get(url, params=params, headers=headers, timeout=12)
+        resp.raise_for_status()
+        return resp.json()
     except Exception as exc:
         print(f"[swap] quote error: {exc!r}")
         return None
 
 
-def jupiter_swap(wallet: Keypair, client: RpcClient, quote: dict):
-    url = f"{JUPITER_BASE}/v6/swap"
+def jupiter_quote(input_mint: str, output_mint: str, amount_lamports: int) -> Optional[Dict[str, Any]]:
+    """
+    Call Jupiter Ultra /v6/quote.
+    """
+    params = {
+        "inputMint": input_mint,
+        "outputMint": output_mint,
+        "amount": amount_lamports,
+        "slippageBps": 500,
+        "onlyDirectRoutes": "false",
+    }
+    data = jupiter_request("/v6/quote", params)
+    if not data:
+        return None
+
+    # Jupiter returns either a single route or "data"/"routes" array depending on version.
+    if isinstance(data, dict):
+        if "data" in data and isinstance(data["data"], list) and data["data"]:
+            return data["data"][0]
+        if "routes" in data and isinstance(data["routes"], list) and data["routes"]:
+            return data["routes"][0]
+        # some variants just *are* a route
+        return data
+    return None
+
+
+def jupiter_swap(wallet: Keypair, client: RpcClient, route: Dict[str, Any]) -> Optional[str]:
+    """
+    Submit a Jupiter swap using /v6/swap.
+    If anything fails, we just log the error and return None (no funds moved).
+    """
+    base = JUPITER_API_BASE.rstrip("/")
+    url = f"{base}/v6/swap"
+    user_pubkey = str(wallet.pubkey())
+
     headers = {
-        "Authorization": f"Bearer {JUPITER_API_KEY}",
-        "x-api-key": JUPITER_API_KEY,
+        "Accept": "application/json",
         "Content-Type": "application/json",
     }
-
-    payload = {
-        "quoteResponse": quote,
-        "userPublicKey": str(wallet.pubkey()),
-        "wrapAndUnwrapSol": True
-    }
+    if JUPITER_API_KEY:
+        headers["x-api-key"] = JUPITER_API_KEY
 
     try:
-        r = requests.post(url, json=payload, headers=headers, timeout=20)
-        r.raise_for_status()
-        data = r.json()
-
+        payload = {
+            "quoteResponse": route,
+            "userPublicKey": user_pubkey,
+            "wrapAndUnwrapSol": True,
+        }
+        resp = requests.post(url, json=payload, headers=headers, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
         if "swapTransaction" not in data:
-            print("[swap] no swapTransaction in response")
+            print("[swap] swapTransaction missing from response.")
             return None
 
-        raw_tx = base64.b64decode(data["swapTransaction"])
-        sig = client.send_raw_transaction(raw_tx)["result"]
-        print(f"[swap] submitted tx: {sig}")
-        return sig
+        swap_tx = data["swapTransaction"]
+        raw_tx = base64.b64decode(swap_tx)
 
+        send_resp = client.send_raw_transaction(raw_tx)
+        sig = send_resp.get("result") or send_resp
+        print(f"[swap] submitted tx: {sig}")
+        return str(sig)
     except Exception as exc:
         print(f"[swap] swap error: {exc!r}")
         return None
-# ---------- signals + trading ----------
+
+# ---------- signal + risk logic ----------
+
 def sample_signal() -> Optional[Dict[str, Any]]:
     """
-    Picks a random meme and assigns a 'probability' 0–1.
-    If prob >= MIN_PROBABILITY, returns a buy signal.
+    Very simple 'aggressive' signal generator:
+    - picks a random meme from list
+    - assigns probability from 0.0 – 1.0
+    - if above MIN_PROBABILITY, returns a 'buy' signal
     """
     if not MEME_TOKENS:
         return None
@@ -199,7 +286,8 @@ def sample_signal() -> Optional[Dict[str, Any]]:
     idx = np.random.randint(0, len(names))
     name = names[idx]
     mint = MEME_TOKENS[name]
-    prob = float(np.random.beta(8, 2))  # skewed high = aggressive
+
+    prob = float(np.random.beta(8, 2))  # skewed high → more aggressive
     risk_ratio = float(np.random.uniform(0.3, 1.0))
 
     if prob < MIN_PROBABILITY:
@@ -212,67 +300,72 @@ def sample_signal() -> Optional[Dict[str, Any]]:
         "risk_ratio": risk_ratio,
     }
 
+
 def should_stop_for_day() -> bool:
+    """Check daily loss cap."""
     global start_day, realized_pnl_usd
     today = datetime.utcnow().date()
     if today != start_day:
         start_day = today
         realized_pnl_usd = 0.0
         return False
+
     if realized_pnl_usd <= -DAILY_LOSS_LIMIT_USD:
-        print(f"[risk] daily loss cap hit {realized_pnl_usd:.2f} USD; stopping for today.")
+        print(f"[risk] daily loss cap hit {realized_pnl_usd:.2f} USD; no more trades today.")
         return True
     return False
 
+
 def trade_once():
-    """
-    One cycle: get a signal, check risk, then simulate or trade live.
-    """
+    """One trading cycle: get signal → risk checks → (live or sim) trade."""
     global balance_sol, realized_pnl_usd
 
     print("[job] Fetching signals…")
     if should_stop_for_day():
         return
 
-    sig = sample_signal()
-    if not sig:
+    signal = sample_signal()
+    if not signal:
         print("[signal] No qualifying signal this cycle.")
         return
 
-    name = sig["name"]
-    mint = sig["mint"]
-    prob = sig["prob"]
-    risk_ratio = sig["risk_ratio"]
+    name = signal["name"]
+    mint = signal["mint"]
+    prob = signal["prob"]
+    risk_ratio = signal["risk_ratio"]
 
     print(f"[signal] name={name} prob={prob:.3f} risk_ratio={risk_ratio:.2f}")
 
-    # position size
+    # position size in SOL
     trade_size_sol = min(balance_sol * risk_ratio, MAX_TRADE_RISK_SOL)
     if trade_size_sol <= 0:
-        print("[trade] No SOL to risk.")
+        print("[trade] No SOL available to risk.")
         return
 
     trade_size_lamports = int(trade_size_sol * 1_000_000_000)
 
     if SIMULATION_MODE or not SOLANA_OK:
-        # aggressive random PnL
-        pnl_mult = float(np.random.normal(loc=1.15, scale=0.5))
+        # purely simulated PnL
+        pnl_mult = float(np.random.normal(loc=1.15, scale=0.5))  # wide aggressive distribution
         new_balance = balance_sol - trade_size_sol + trade_size_sol * pnl_mult
         pnl_sol = new_balance - balance_sol
         balance_sol = new_balance
+
         pnl_usd = pnl_sol * SOL_PRICE_USD
         realized_pnl_usd += pnl_usd
-        print(f"[SIM] traded {trade_size_sol:.4f} → pnl={pnl_sol:.4f} new={balance_sol:.4f} SOL (~${pnl_usd:.2f})")
+
+        print(f"[SIM] traded {trade_size_sol:.4f} → pnl={pnl_sol:.4f} new={balance_sol:.4f} SOL (pnl_usd={pnl_usd:.2f})")
         return
 
-    # LIVE PATH
+    # ------- LIVE TRADING PATH -------
+
     wallet, client = init_solana_wallet()
     if not wallet or not client:
-        print("[live] No wallet/client; skipping live trade.")
+        print("[live] Wallet/client not available; skipping live trade.")
         return
 
+    # SOL mint → token mint swap (we assume input = SOL)
     SOL_MINT = "So11111111111111111111111111111111111111112"
-
     route = jupiter_quote(SOL_MINT, mint, trade_size_lamports)
     if not route:
         print("[live] No viable route from Jupiter.")
@@ -283,30 +376,40 @@ def trade_once():
         print("[live] Swap failed; no funds moved (as far as we know).")
         return
 
-    print(f"[LIVE] swap submitted: {sig} | {trade_size_sol:.4f} SOL into {name} ({mint})")
+    print(f"[LIVE] swap submitted for {trade_size_sol:.4f} SOL into {name} mint={mint}, tx={sig}")
 
-# ---------- main ----------
+
+# ---------- main loop ----------
+
 def main():
     print(">>> memebot.py starting")
-    print(f"[start] SIMULATION_MODE={SIMULATION_MODE} STARTING_SOL={STARTING_SOL:.4f}")
+    print(
+        f"[start] SIMULATION_MODE={SIMULATION_MODE} "
+        f"STARTING_SOL={STARTING_SOL:.4f} "
+        f"JUP_BASE={JUPITER_API_BASE} "
+        f"HAS_KEY={'yes' if bool(JUPITER_API_KEY) else 'no'}"
+    )
 
     if not SOLANA_OK and not SIMULATION_MODE:
-        print("[fatal] No Solana libs and SIMULATION_MODE=False. Install packages or enable simulation.")
+        print("[fatal] SIMULATION_MODE=False but SOLANA_OK=False; "
+              "cannot go live until solana + solders are installed correctly.")
         return
 
     if START_MODE == "withdraw":
-        print("[withdraw] Withdraw logic not implemented in this version.")
+        print("[withdraw] START_MODE=withdraw not implemented yet – exiting.")
         return
 
-    # schedule
+    # schedule trading job
     schedule.every(SCAN_INTERVAL_SECONDS).seconds.do(trade_once)
 
-    # run once immediately
+    # run immediately once on start
     trade_once()
 
+    # main polling loop
     while True:
         schedule.run_pending()
         time.sleep(1)
+
 
 if __name__ == "__main__":
     main()
