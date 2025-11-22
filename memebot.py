@@ -131,65 +131,61 @@ def init_solana_wallet() -> tuple[Optional[Keypair], Optional[RpcClient]]:
         return None, None
 
 # ---------- Jupiter public helpers ----------
-def jupiter_quote(input_mint: str, output_mint: str, amount_lamports: int) -> Optional[Dict[str, Any]]:
-    """
-    Call Jupiter public v6 quote endpoint (no auth).
-    Returns a dict with route info or None.
-    """
+def jupiter_quote(input_mint: str, output_mint: str, amount: int):
     url = f"{JUPITER_BASE}/v6/quote"
+    headers = {
+        "Authorization": f"Bearer {JUPITER_API_KEY}",
+        "x-api-key": JUPITER_API_KEY,
+        "Accept": "application/json",
+    }
     params = {
         "inputMint": input_mint,
         "outputMint": output_mint,
-        "amount": str(amount_lamports),
+        "amount": amount,
         "slippageBps": 500,
         "onlyDirectRoutes": "false",
     }
 
     try:
-        resp = requests.get(url, params=params, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
-        # Jupiter can return { "data": [routes...] } or a single route
-        if isinstance(data, dict) and "data" in data:
-            routes = data.get("data") or []
-            if not routes:
-                return None
-            return routes[0]
-        # fallback if already a route
-        return data
+        r = requests.get(url, params=params, headers=headers, timeout=10)
+        r.raise_for_status()
+        return r.json()
     except Exception as exc:
         print(f"[swap] quote error: {exc!r}")
         return None
 
-def jupiter_swap(wallet: Keypair, client: RpcClient, route: Dict[str, Any]) -> Optional[str]:
-    """
-    Submit a Jupiter swap using /v6/swap.
-    """
+
+def jupiter_swap(wallet: Keypair, client: RpcClient, quote: dict):
+    url = f"{JUPITER_BASE}/v6/swap"
+    headers = {
+        "Authorization": f"Bearer {JUPITER_API_KEY}",
+        "x-api-key": JUPITER_API_KEY,
+        "Content-Type": "application/json",
+    }
+
+    payload = {
+        "quoteResponse": quote,
+        "userPublicKey": str(wallet.pubkey()),
+        "wrapAndUnwrapSol": True
+    }
+
     try:
-        url = f"{JUPITER_BASE}/v6/swap"
-        user_pubkey = str(wallet.pubkey())
-        payload = {
-            "quoteResponse": route,
-            "userPublicKey": user_pubkey,
-            "wrapAndUnwrapSol": True,
-        }
-        resp = requests.post(url, json=payload, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
+        r = requests.post(url, json=payload, headers=headers, timeout=20)
+        r.raise_for_status()
+        data = r.json()
+
         if "swapTransaction" not in data:
-            print("[swap] swapTransaction missing from response.")
+            print("[swap] no swapTransaction in response")
             return None
 
-        swap_tx = data["swapTransaction"]
-        raw_tx = base64.b64decode(swap_tx)
-        send_resp = client.send_raw_transaction(raw_tx)
-        sig = send_resp.get("result") or send_resp
+        raw_tx = base64.b64decode(data["swapTransaction"])
+        sig = client.send_raw_transaction(raw_tx)["result"]
         print(f"[swap] submitted tx: {sig}")
         return sig
+
     except Exception as exc:
         print(f"[swap] swap error: {exc!r}")
         return None
-
 # ---------- signals + trading ----------
 def sample_signal() -> Optional[Dict[str, Any]]:
     """
