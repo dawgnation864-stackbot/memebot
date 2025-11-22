@@ -1,12 +1,11 @@
 """
-MemeBot – aggressive Solana memecoin bot for Railway + Jupiter
+MemeBot – aggressive Solana memecoin bot for Railway + Jupiter Ultra
 
-REQUIRED ENV VARS (Railway → Variables)
----------------------------------------
+ENV VARIABLES (Railway → Variables):
 
-# run modes
-SIMULATION_MODE        -> "True" or "False"  (string)
-START_MODE             -> "start"  (or "withdraw" – not implemented yet)
+# core run modes
+SIMULATION_MODE        -> "True" or "False" (string)
+START_MODE             -> "start" (default) or "withdraw"
 
 # wallet / RPC
 WALLET_PRIVATE_KEY     -> base58-encoded secret key (NOT your seed phrase)
@@ -16,7 +15,7 @@ WITHDRAWAL_ADDRESS     -> your Solana address for emergency withdraws
 # risk / sizing
 STARTING_SOL           -> e.g. 0.4000
 DAILY_LOSS_LIMIT_USD   -> e.g. 25
-SOL_PRICE_USD          -> e.g. 180  (rough pnl calc only)
+SOL_PRICE_USD          -> e.g. 180  (rough PnL calc only)
 MAX_TRADE_RISK_SOL     -> e.g. 0.40
 TAKE_PROFIT_MULT       -> e.g. 2.0   (2x)
 STOP_LOSS_MULT         -> e.g. 0.5   (-50%)
@@ -25,49 +24,33 @@ STOP_LOSS_MULT         -> e.g. 0.5   (-50%)
 MIN_PROBABILITY        -> e.g. 0.70
 SCAN_INTERVAL_SECONDS  -> e.g. 60
 
-# Jupiter API
-#  Option A: public v6 (NO key needed)
-#     JUPITER_API_BASE  = https://quote-api.jup.ag
-#     JUPITER_QUOTE_PATH= /v6/quote
-#     JUPITER_SWAP_PATH = /v6/swap
-#     JUPITER_API_KEY   =  (empty)
-#
-#  Option B: Ultra v1 (requires key + plan)
-#     JUPITER_API_BASE  = https://api.jup.ag/ultra/v1
-#     JUPITER_QUOTE_PATH= /quote
-#     JUPITER_SWAP_PATH = /swap
-#     JUPITER_API_KEY   = your Ultra key
-#
-JUPITER_API_BASE       -> see above
-JUPITER_QUOTE_PATH     -> see above
-JUPITER_SWAP_PATH      -> see above
-JUPITER_API_KEY        -> your key (or blank for public)
+# Jupiter Ultra
+JUPITER_API_KEY        -> your key from the Ultra dashboard
+JUPITER_API_BASE       -> optional, default "https://api.jup.ag/ultra"
 
 # safety / misc
-PIN                    -> any 4–6 digit number you set (for future controls)
+PIN                    -> any 4–6 digit number (future controls)
 NEGATIVE_KEYWORDS      -> comma list, e.g. "honeypot,scam,rugpull"
-MEME_TOKENS            -> optional comma list of mint addresses
-                         formats:
-                           "BONK:mint,WIF:mint,..." or
-                           "mint1,mint2,..."
+MEME_TOKENS            -> optional comma list of mint addresses or NAME:mint pairs
 """
 
 from __future__ import annotations
 
-# ---------- standard library ----------
+# ---------- standard library imports ----------
 import os
-import time
+import asyncio
 import base64
+import time
 from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Tuple
 
-# ---------- third-party ----------
+# ---------- third-party imports ----------
 import requests
 import numpy as np
 from dotenv import load_dotenv
 import schedule
 
-# ---------- optional Solana / Jupiter libs ----------
+# ---------- optional Solana / Jupiter support ----------
 SOLANA_OK = False
 try:
     from solana.rpc.api import Client as RpcClient
@@ -79,10 +62,11 @@ except Exception as exc:
     print(f"[solana] Import error: {exc!r}")
     SOLANA_OK = False
 
-# ---------- env helpers ----------
+# ---------- load env ----------
 load_dotenv()
 
 
+# ---------- helpers for env ----------
 def env_bool(name: str, default: bool) -> bool:
     return os.getenv(name, str(default)).strip().lower() in {"1", "true", "yes", "y"}
 
@@ -94,7 +78,7 @@ def env_float(name: str, default: float) -> float:
         return default
 
 
-# ---------- config from env ----------
+# ---------- configuration from env ----------
 
 SIMULATION_MODE = env_bool("SIMULATION_MODE", True)
 START_MODE = os.getenv("START_MODE", "start").strip().lower()
@@ -113,11 +97,9 @@ STOP_LOSS_MULT = env_float("STOP_LOSS_MULT", 0.5)
 MIN_PROBABILITY = env_float("MIN_PROBABILITY", 0.7)
 SCAN_INTERVAL_SECONDS = int(env_float("SCAN_INTERVAL_SECONDS", 60))
 
-# Jupiter configuration – **all HTTP issues are here**
-JUPITER_API_BASE = os.getenv("JUPITER_API_BASE", "https://quote-api.jup.ag").rstrip("/")
-JUPITER_QUOTE_PATH = os.getenv("JUPITER_QUOTE_PATH", "/v6/quote")
-JUPITER_SWAP_PATH = os.getenv("JUPITER_SWAP_PATH", "/v6/swap")
+# Jupiter Ultra configuration
 JUPITER_API_KEY = os.getenv("JUPITER_API_KEY", "").strip()
+JUPITER_API_BASE = os.getenv("JUPITER_API_BASE", "https://api.jup.ag/ultra").rstrip("/")
 
 PIN_CODE = os.getenv("PIN", "0000").strip()
 NEGATIVE_KEYWORDS = [
@@ -126,7 +108,7 @@ NEGATIVE_KEYWORDS = [
     if k.strip()
 ]
 
-# Aggressive default meme list – EXAMPLE mints, not investment advice
+# Aggressive default meme list – EXAMPLE mints (you can replace with your favorites)
 DEFAULT_MEME_TOKENS: Dict[str, str] = {
     "BONK": "DezXAFuB81om4uPCecv9hVb2tSCD5qLQJd4d8zF9CqY",
     "WIF": "8bF4uoN9kUQJeVX5TR1fURCa8yE1xHd2h9kPGfiVNN7E",
@@ -155,7 +137,7 @@ if MEME_TOKENS_ENV:
 else:
     MEME_TOKENS = DEFAULT_MEME_TOKENS
 
-# ---------- runtime state ----------
+# ---------- state ----------
 balance_sol = STARTING_SOL
 start_day = datetime.utcnow().date()
 realized_pnl_usd = 0.0
@@ -163,10 +145,10 @@ realized_pnl_usd = 0.0
 
 # ---------- Solana helpers ----------
 
-def init_solana_wallet():
+def init_solana_wallet() -> Tuple[Keypair | None, RpcClient | None]:
     """Load wallet from WALLET_PRIVATE_KEY if libs and key are available."""
     if not SOLANA_OK:
-        print("[wallet] SOLANA_OK=False, cannot init wallet (libs missing).")
+        print("[wallet] SOLANA_OK=False, cannot init wallet.")
         return None, None
 
     if not WALLET_PRIVATE_KEY:
@@ -186,107 +168,74 @@ def init_solana_wallet():
         return None, None
 
 
-# ---------- Jupiter HTTP helpers ----------
+# ---------- Jupiter Ultra helpers ----------
 
-def build_jupiter_headers() -> Dict[str, str]:
-    headers = {"Content-Type": "application/json"}
+def jupiter_headers() -> Dict[str, str]:
+    headers = {
+        "accept": "application/json",
+        "content-type": "application/json",
+    }
     if JUPITER_API_KEY:
-        # Jupiter generally expects this header for API keys
-        headers["x-api-key"] = JUPITER_API_KEY
+        # IMPORTANT: Ultra expects the key in this header, not Authorization
+        headers["x-jupiter-api-key"] = JUPITER_API_KEY
     return headers
 
 
-def jupiter_quote(input_mint: str, output_mint: str, amount_lamports: int) -> Optional[Dict[str, Any]]:
+def jupiter_quote(
+    input_mint: str,
+    output_mint: str,
+    amount_lamports: int,
+    slippage_bps: int = 500,
+) -> Dict[str, Any] | None:
     """
-    Ask Jupiter for best route.
-    Returns a route dict compatible with /swap, or None if nothing / HTTP error.
+    Call Jupiter Ultra quote endpoint.
+    Uses base: JUPITER_API_BASE (default https://api.jup.ag/ultra)
+    Path: /quote
     """
-    base = JUPITER_API_BASE.rstrip("/")
-    path = JUPITER_QUOTE_PATH if JUPITER_QUOTE_PATH.startswith("/") else "/" + JUPITER_QUOTE_PATH
-    url = f"{base}{path}"
-
+    url = f"{JUPITER_API_BASE}/quote"
     params = {
         "inputMint": input_mint,
         "outputMint": output_mint,
         "amount": str(amount_lamports),
-        "slippageBps": "500",
+        "slippageBps": str(slippage_bps),
         "onlyDirectRoutes": "false",
     }
 
     try:
-        resp = requests.get(url, params=params, headers=build_jupiter_headers(), timeout=20)
-
-        if resp.status_code == 401:
-            print("[swap] Jupiter 401 Unauthorized – this is NOT a Python error.")
-            print("       → Check JUPITER_API_KEY, plan status, and allowed endpoint in your Jupiter dashboard.")
-            return None
-
-        if resp.status_code == 404:
-            print(f"[swap] Jupiter 404 Not Found for {url} – most likely wrong QUOTE path/base.")
-            print("       → Verify JUPITER_API_BASE + JUPITER_QUOTE_PATH match the docs.")
-            return None
-
-        if resp.status_code >= 500:
-            print(f"[swap] Jupiter server error {resp.status_code}: will skip this trade.")
-            return None
-
+        resp = requests.get(url, params=params, headers=jupiter_headers(), timeout=10)
         resp.raise_for_status()
         data = resp.json()
-
-        # Public v6:  {"data": [ route, ... ]}
-        # Ultra v1 :  may already be a route dict
-        if isinstance(data, dict) and "data" in data:
-            routes = data.get("data") or []
-            if not routes:
-                print("[swap] Quote OK but no routes returned.")
-                return None
-            return routes[0]
-
-        if not data:
-            print("[swap] Empty quote response.")
-            return None
-
-        return data
-
-    except requests.exceptions.RequestException as exc:
+        # Ultra normally returns a list; choose best route
+        if isinstance(data, list) and data:
+            return data[0]
+        if isinstance(data, dict) and data.get("routes"):
+            return data["routes"][0]
+        print(f"[swap] quote warning: unexpected response shape: {data}")
+        return None
+    except requests.HTTPError as exc:
+        print(f"[swap] quote error: HTTPError('{exc}') for url: {resp.url}")
+        return None
+    except Exception as exc:
         print(f"[swap] quote network/error: {exc!r}")
         return None
 
 
-def jupiter_swap(wallet: Keypair, client: RpcClient, route: Dict[str, Any]) -> Optional[str]:
+def jupiter_swap(wallet: Keypair, client: RpcClient, route: Dict[str, Any]) -> str | None:
     """
-    Submit a Jupiter swap using the configured SWAP endpoint.
-    If anything fails, we log and return None (assume no funds moved).
+    Submit a Jupiter Ultra swap using /swap.
     """
-    base = JUPITER_API_BASE.rstrip("/")
-    path = JUPITER_SWAP_PATH if JUPITER_SWAP_PATH.startswith("/") else "/" + JUPITER_SWAP_PATH
-    url = f"{base}{path}"
+    url = f"{JUPITER_API_BASE}/swap"
+    user_pubkey = str(wallet.pubkey())
+    payload = {
+        "quoteResponse": route,
+        "userPublicKey": user_pubkey,
+        "wrapAndUnwrapSol": True,
+    }
 
     try:
-        user_pubkey = str(wallet.pubkey())
-        payload = {
-            "quoteResponse": route,
-            "userPublicKey": user_pubkey,
-            "wrapAndUnwrapSol": True,
-        }
-
-        resp = requests.post(url, json=payload, headers=build_jupiter_headers(), timeout=30)
-
-        if resp.status_code == 401:
-            print("[swap] Jupiter 401 Unauthorized on /swap – check your key/plan.")
-            return None
-
-        if resp.status_code == 404:
-            print(f"[swap] Jupiter 404 Not Found for {url} – wrong SWAP path/base.")
-            return None
-
-        if resp.status_code >= 500:
-            print(f"[swap] Jupiter swap server error {resp.status_code}: {resp.text[:200]}")
-            return None
-
+        resp = requests.post(url, json=payload, headers=jupiter_headers(), timeout=30)
         resp.raise_for_status()
         data = resp.json()
-
         if "swapTransaction" not in data:
             print("[swap] swapTransaction missing from response.")
             return None
@@ -295,22 +244,24 @@ def jupiter_swap(wallet: Keypair, client: RpcClient, route: Dict[str, Any]) -> O
         raw_tx = base64.b64decode(swap_tx)
 
         send_resp = client.send_raw_transaction(raw_tx)
-        sig = send_resp.get("result")
+        sig = send_resp.get("result") or send_resp
         print(f"[swap] submitted tx: {sig}")
-        return sig
-
+        return str(sig)
+    except requests.HTTPError as exc:
+        print(f"[swap] swap HTTPError('{exc}') for url: {resp.url}")
+        return None
     except Exception as exc:
         print(f"[swap] swap error: {exc!r}")
         return None
 
 
-# ---------- signal + risk logic ----------
+# ---------- signal + trading logic ----------
 
-def sample_signal() -> Optional[Dict[str, Any]]:
+def sample_signal() -> Dict[str, Any] | None:
     """
     Very simple 'aggressive' signal generator:
     - picks a random meme from list
-    - assigns probability from 0.0 – 1.0
+    - assigns probability from 0.0 – 1.0 (skewed high)
     - if above MIN_PROBABILITY, returns a 'buy' signal
     """
     if not MEME_TOKENS:
@@ -321,13 +272,18 @@ def sample_signal() -> Optional[Dict[str, Any]]:
     name = names[idx]
     mint = MEME_TOKENS[name]
 
-    prob = float(np.random.beta(8, 2))  # skewed high → aggressive
+    prob = float(np.random.beta(8, 2))  # skewed > 0.5 → aggressive
     risk_ratio = float(np.random.uniform(0.3, 1.0))
 
     if prob < MIN_PROBABILITY:
         return None
 
-    return {"name": name, "mint": mint, "prob": prob, "risk_ratio": risk_ratio}
+    return {
+        "name": name,
+        "mint": mint,
+        "prob": prob,
+        "risk_ratio": risk_ratio,
+    }
 
 
 def should_stop_for_day() -> bool:
@@ -340,7 +296,7 @@ def should_stop_for_day() -> bool:
         return False
 
     if realized_pnl_usd <= -DAILY_LOSS_LIMIT_USD:
-        print(f"[risk] Daily loss cap hit {realized_pnl_usd:.2f} USD; no more trades today.")
+        print(f"[risk] daily loss cap hit {realized_pnl_usd:.2f} USD; no more trades today.")
         return True
     return False
 
@@ -365,7 +321,6 @@ def trade_once():
 
     print(f"[signal] name={name} prob={prob:.3f} risk_ratio={risk_ratio:.2f}")
 
-    # position size in SOL
     trade_size_sol = min(balance_sol * risk_ratio, MAX_TRADE_RISK_SOL)
     if trade_size_sol <= 0:
         print("[trade] No SOL available to risk.")
@@ -373,8 +328,8 @@ def trade_once():
 
     trade_size_lamports = int(trade_size_sol * 1_000_000_000)
 
+    # --- SIMULATION PATH ---
     if SIMULATION_MODE or not SOLANA_OK:
-        # simulated PnL
         pnl_mult = float(np.random.normal(loc=1.15, scale=0.5))
         new_balance = balance_sol - trade_size_sol + trade_size_sol * pnl_mult
         pnl_sol = new_balance - balance_sol
@@ -389,7 +344,7 @@ def trade_once():
         )
         return
 
-    # ------- LIVE TRADING PATH -------
+    # --- LIVE TRADING PATH ---
 
     wallet, client = init_solana_wallet()
     if not wallet or not client:
@@ -397,6 +352,7 @@ def trade_once():
         return
 
     SOL_MINT = "So11111111111111111111111111111111111111112"
+
     route = jupiter_quote(SOL_MINT, mint, trade_size_lamports)
     if not route:
         print("[live] No viable route from Jupiter (quote failed).")
@@ -404,10 +360,13 @@ def trade_once():
 
     sig = jupiter_swap(wallet, client, route)
     if not sig:
-        print("[live] Swap failed or not accepted; assume no funds moved.")
+        print("[live] Swap failed; no funds moved (as far as we know).")
         return
 
-    print(f"[LIVE] swap submitted for {trade_size_sol:.4f} SOL into {name} mint={mint}, tx={sig}")
+    print(
+        f"[LIVE] swap submitted for {trade_size_sol:.4f} SOL into {name} "
+        f"mint={mint}, tx={sig}"
+    )
 
 
 # ---------- main loop ----------
@@ -415,32 +374,29 @@ def trade_once():
 def main():
     print(">>> memebot.py starting")
     print(
-        f"[start] SIMULATION_MODE={SIMULATION_MODE} STARTING_SOL={STARTING_SOL:.4f} "
-        f"MODE={START_MODE}"
-    )
-    print(
-        f"[jupiter] base={JUPITER_API_BASE} quote_path={JUPITER_QUOTE_PATH} "
-        f"swap_path={JUPITER_SWAP_PATH} key_present={bool(JUPITER_API_KEY)}"
+        f"[start] SIMULATION_MODE={SIMULATION_MODE} "
+        f"STARTING_SOL={STARTING_SOL:.4f}"
     )
 
     if not SOLANA_OK and not SIMULATION_MODE:
         print(
-            "[fatal] SIMULATION_MODE=False but solana/solders not installed; "
-            "cannot go live."
+            "[fatal] SIMULATION_MODE=False but SOLANA_OK=False; "
+            "cannot go live until solana + solders are installed correctly."
         )
         return
 
+    if not JUPITER_API_KEY:
+        print("[warn] JUPITER_API_KEY is empty – Jupiter Ultra will return 401/403!")
+
     if START_MODE == "withdraw":
-        print("[withdraw] START_MODE=withdraw not implemented yet.")
+        print("[withdraw] START_MODE=withdraw not implemented in this version.")
         return
 
-    # schedule trading job
     schedule.every(SCAN_INTERVAL_SECONDS).seconds.do(trade_once)
 
     # run once immediately
     trade_once()
 
-    # main loop
     while True:
         schedule.run_pending()
         time.sleep(1)
